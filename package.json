@@ -1,0 +1,23 @@
+{
+  "name": "yoryon-harness",
+  "version": "0.1.0",
+  "description": "Personal Universal Agent Harness: repository conventions, doc lifecycle management, link/structure linter, and sandbox execution wrapper.",
+  "type": "module",
+  "bin": {
+    "harness": "./bin/harness.js",
+    "yoryon-harness": "./bin/harness.js"
+  },
+  "scripts": {
+    "doctor": "node ./bin/harness.js doctor",
+    "test": "node ./tests/harness.test.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "templates/"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
