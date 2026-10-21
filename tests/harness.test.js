@@ -88,11 +88,24 @@ function main() {
   assert.ok(linkFail.diagnostics.some((d) => d.code === "VOX001"));
   assert.ok(linkFail.diagnostics.some((d) => d.code === "SUP001"));
 
-  // 6. Hook install & agent hook exit code 2 verification
+  // 6. Hook install & agent hook exit code 2 verification + sandbox TTL cleanup
   assert.equal(runCli(sandboxRoot, ["hook", "install", "--claude"]).status, 0);
   assert.ok(fs.existsSync(path.join(sandboxRoot, ".claude/settings.json")));
+
+  const expiredWork = path.join(sandboxRoot, "work", "expired-run");
+  const freshWork = path.join(sandboxRoot, "work", "fresh-run");
+  fs.mkdirSync(expiredWork, { recursive: true });
+  fs.mkdirSync(freshWork, { recursive: true });
+  const twoDaysAgo = new Date(Date.now() - 48 * 3600 * 1000);
+  fs.utimesSync(expiredWork, twoDaysAgo, twoDaysAgo);
+
   const hookAgentRes = runCli(sandboxRoot, ["hook", "run", "--agent"]);
   assert.equal(hookAgentRes.status, 2);
+  assert.equal(fs.existsSync(expiredWork), false, "Expired work dir should be auto-cleaned by hook");
+  assert.equal(fs.existsSync(freshWork), true, "Fresh work dir should be preserved by hook");
+
+  assert.equal(runCli(sandboxRoot, ["clean", "--all"]).status, 0);
+  assert.equal(fs.existsSync(freshWork), false, "harness clean --all should remove all sandbox items");
 
   // Clean up test sandbox
   fs.rmSync(sandboxRoot, { recursive: true, force: true });

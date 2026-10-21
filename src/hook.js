@@ -1,13 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { checkWorkspace } from "./doctor.js";
+import { cleanSandboxes } from "./clean.js";
 
 const PRE_COMMIT_MARKER = "# yoryon-harness pre-commit hook";
 const PRE_COMMIT_SNIPPET = `${PRE_COMMIT_MARKER}
 if command -v harness >/dev/null 2>&1; then
-  harness doctor
+  harness hook run
 elif [ -f "./bin/harness.js" ]; then
-  node ./bin/harness.js doctor
+  node ./bin/harness.js hook run
 fi
 `;
 
@@ -98,6 +99,12 @@ export function installHooks(targetRoot = process.cwd(), options = {}) {
  * and automatically repair the documentation formatting & file placement.
  */
 export function runHook(targetRoot = process.cwd(), { agentMode = false } = {}) {
+  try {
+    cleanSandboxes(targetRoot, { quiet: true });
+  } catch {
+    // Non-fatal: never block hook execution if sandbox cleanup encounters transient FS error
+  }
+
   const diagnostics = checkWorkspace(targetRoot);
   if (diagnostics.length === 0) {
     return 0;

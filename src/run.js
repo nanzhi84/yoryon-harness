@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { cleanSandboxes } from "./clean.js";
 
 function formatTimestamp(date = new Date()) {
   const pad = (n) => String(n).padStart(2, "0");
@@ -29,6 +30,12 @@ export async function runSandboxTask(targetRoot, taskName, cmdArgs) {
   if (!taskName || !cmdArgs || cmdArgs.length === 0) {
     console.error("Usage: harness run <task-name> -- <command> [args...]");
     return 1;
+  }
+
+  try {
+    cleanSandboxes(targetRoot, { quiet: true });
+  } catch {
+    // Ignore transient cleanup error before starting new sandbox run
   }
 
   const slug = sanitizeSlug(taskName);

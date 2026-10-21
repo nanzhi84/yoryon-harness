@@ -5,6 +5,7 @@ import { runDoctor, printRules } from "../src/doctor.js";
 import { runSandboxTask } from "../src/run.js";
 import { createSpec, createAdr, supersedeAdr } from "../src/scaffold.js";
 import { installHooks, runHook } from "../src/hook.js";
+import { cleanSandboxes } from "../src/clean.js";
 
 const HELP_TEXT = `yoryon-harness — Personal Universal Agent Harness CLI
 
@@ -16,8 +17,9 @@ Commands:
   sync                                          Sync latest AGENTS.md and docs/README.md without touching project files
   doctor [--json]                               Check directory conventions, doc/text rules, and dead links
   rule [--all | <CODE>]                         Explain Harness check rules (HAR001, GIT001, ARC001, SPC001, ADR001/002, REF001, LNK001/002, VOX001, SUP001)
-  hook install [--git] [--claude]               Install Git pre-commit hook and/or Claude Code Stop hook for auto-repair
-  hook run [--agent]                            Execute hook check (exits with code 2 in --agent mode to force model repair)
+  hook install [--git] [--claude]               Install Git pre-commit hook and/or Claude Code Stop hook for auto-repair & TTL cleanup
+  hook run [--agent]                            Execute TTL sandbox cleanup + hook check (exits with code 2 in --agent mode)
+  clean [--all] [--max-age 12h] [--keep <N>]    Clean expired or all intermediate files in work/ and artifacts/
   run <task-name> -- <cmd> [args...]            Run verification command in isolated work/ & artifacts/ sandbox with receipt
   spec new <issue#<N>> [--title] [--module]     Create an issue-aligned spec directory (docs/spec/issue#<N>/spec.md)
   adr new <slug>                                Create a sequentially numbered ADR (docs/adr/NNNN-<slug>.md)
@@ -87,6 +89,16 @@ async function main() {
         );
         process.exit(1);
       }
+      break;
+    }
+
+    case "clean": {
+      const all = args.includes("--all");
+      const dryRun = args.includes("--dry-run");
+      const quiet = args.includes("--quiet");
+      const maxAge = parseFlagValue(args, "--max-age");
+      const keep = parseFlagValue(args, "--keep");
+      cleanSandboxes(cwd, { all, dryRun, quiet, maxAge, keep });
       break;
     }
 

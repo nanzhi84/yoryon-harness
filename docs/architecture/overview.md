@@ -9,20 +9,25 @@ flowchart TD
     CLI["bin/harness.js (CLI 路由入口)"] --> Init["src/init.js (骨架注入与同步)"]
     CLI --> Doctor["src/doctor.js (结构与死链巡检)"]
     CLI --> Hook["src/hook.js (Agent 与 Git 自动钩子)"]
+    CLI --> Clean["src/clean.js (沙盒 TTL 与配额清理)"]
     CLI --> Run["src/run.js (隔离沙盒执行)"]
     CLI --> Scaffold["src/scaffold.js (Spec & ADR 流转)"]
 
     Init --> Tpl["templates/ (标准骨架母本)"]
+    Hook --> Clean
     Hook --> Doctor
+    Run --> Clean
     Doctor --> Rules["自研巡检规则 (HAR/GIT/ARC/SPC/ADR/REF/LNK/VOX/SUP)"]
     Run --> Sandbox["work/<run-id>/ & artifacts/<run-id>/"]
+    Clean --> Sandbox
 ```
 
 - [bin/harness.js](../../bin/harness.js)：CLI 命令解析与子命令分发路由，不包含具体文件系统状态修改逻辑。
 - [src/init.js](../../src/init.js)：负责 `harness init` 与 `harness sync`，从 [templates/](../../templates) 读取母本并向目标仓库写入目录与通用规范。
 - [src/doctor.js](../../src/doctor.js)：负责 `harness doctor` 与 `harness rule`，执行目录契约、生命周期位置、三列索引及 Markdown 本地死链/锚点检查。
-- [src/hook.js](../../src/hook.js)：负责 `harness hook install` 与 `harness hook run --agent`，通过 Git `pre-commit` 与 Agent `Stop` 钩子自动拦截违规并驱动模型自修复。
-- [src/run.js](../../src/run.js)：负责 `harness run`，接管验收命令的隔离沙盒目录创建、环境变量注入与回执落盘。
+- [src/hook.js](../../src/hook.js)：负责 `harness hook install` 与 `harness hook run --agent`，通过 Git `pre-commit` 与 Agent `Stop` 钩子自动清理过期沙盒产物、拦截违规并驱动模型自修复。
+- [src/clean.js](../../src/clean.js)：负责 `harness clean` 及生命周期钩子触发的 `work/`、`artifacts/` 中间产物 TTL / 数量配额清理（保护 `.gitkeep` 与 `.gitignore`）。
+- [src/run.js](../../src/run.js)：负责 `harness run`，接管验收命令的隔离沙盒目录创建、过期产物惰性清理、环境变量注入与回执落盘。
 - [src/scaffold.js](../../src/scaffold.js)：负责 `harness spec new`、`harness adr new` 与 `harness adr supersede` 的确定性文档流转。
 
 ## 2. 核心执行链路与数据流
