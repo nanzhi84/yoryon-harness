@@ -17,8 +17,8 @@ Commands:
   sync                                          Sync latest AGENTS.md and docs/README.md without touching project files
   doctor [--json]                               Check directory conventions, doc/text rules, and dead links
   rule [--all | <CODE>]                         Explain Harness check rules (HAR001, GIT001, ARC001, SPC001, ADR001/002, REF001, LNK001/002, VOX001, SUP001)
-  hook install [--git] [--claude]               Install Git pre-commit hook and/or Claude Code Stop hook for auto-repair & TTL cleanup
-  hook run [--agent]                            Execute TTL sandbox cleanup + hook check (exits with code 2 in --agent mode)
+  hook install [--git] [--agents]               Install Git pre-commit hook and/or .agents/hooks.json Stop hook for auto-repair & TTL cleanup
+  hook run [--agent]                            Execute TTL sandbox cleanup + hook check (outputs Antigravity Stop hook JSON in --agent mode)
   clean [--all] [--max-age 12h] [--keep <N>]    Clean expired or all intermediate files in work/ and artifacts/
   run <task-name> -- <cmd> [args...]            Run verification command in isolated work/ & artifacts/ sandbox with receipt
   spec new <issue#<N>> [--title] [--module]     Create an issue-aligned spec directory (docs/spec/issue#<N>/spec.md)
@@ -76,8 +76,8 @@ async function main() {
       const sub = args[1];
       if (sub === "install") {
         const git = args.includes("--git");
-        const claude = args.includes("--claude");
-        const code = installHooks(cwd, { git, claude });
+        const agents = args.includes("--agents");
+        const code = installHooks(cwd, { git, agents });
         process.exit(code);
       } else if (sub === "run") {
         const agentMode = args.includes("--agent");
@@ -85,7 +85,7 @@ async function main() {
         process.exit(code);
       } else {
         console.error(
-          "Usage:\n  harness hook install [--git] [--claude]\n  harness hook run [--agent]"
+          "Usage:\n  harness hook install [--git] [--agents]\n  harness hook run [--agent]"
         );
         process.exit(1);
       }

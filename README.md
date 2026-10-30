@@ -25,7 +25,7 @@
 
 ## Get started
 
-将以下指令直接粘贴给你的 Coding Agent（如 Claude Code、Cursor 等），即可为新项目或历史老项目一键接入并对齐 `yoryon-harness`：
+将以下指令直接粘贴给你的 Coding Agent（如 Antigravity 等），即可为新项目或历史老项目一键接入并对齐 `yoryon-harness`：
 
 ```text
 请为当前仓库接入 yoryon-harness 并对齐现有文档结构：

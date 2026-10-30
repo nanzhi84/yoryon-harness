@@ -88,9 +88,9 @@ function main() {
   assert.ok(linkFail.diagnostics.some((d) => d.code === "VOX001"));
   assert.ok(linkFail.diagnostics.some((d) => d.code === "SUP001"));
 
-  // 6. Hook install & agent hook exit code 2 verification + sandbox TTL cleanup
-  assert.equal(runCli(sandboxRoot, ["hook", "install", "--claude"]).status, 0);
-  assert.ok(fs.existsSync(path.join(sandboxRoot, ".claude/settings.json")));
+  // 6. Hook install (.agents/hooks.json) & agent hook verification + sandbox TTL cleanup
+  assert.equal(runCli(sandboxRoot, ["hook", "install", "--agents"]).status, 0);
+  assert.ok(fs.existsSync(path.join(sandboxRoot, ".agents/hooks.json")));
 
   const expiredWork = path.join(sandboxRoot, "work", "expired-run");
   const freshWork = path.join(sandboxRoot, "work", "fresh-run");
