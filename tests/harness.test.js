@@ -332,6 +332,92 @@ function main() {
   const allowStopJson = JSON.parse(allowStopRes.stdout.trim());
   assert.equal(allowStopJson.decision, "stop");
 
+  // 8c. Ruff (Python Linter) blocking on NO_TOOL_CALL
+  const ruffBin = path.join(venvBinDir, "ruff");
+  const ruffPayload = JSON.stringify([
+    {
+      code: "F401",
+      filename: "src/app.py",
+      location: { row: 3, column: 8 },
+      message: "`os` imported but unused",
+    },
+  ]);
+  fs.writeFileSync(
+    ruffBin,
+    `#!/bin/sh\nprintf '%s\\n' '${ruffPayload}'\nexit 1\n`,
+    { mode: 0o755 }
+  );
+  fs.chmodSync(ruffBin, 0o755);
+
+  const ruffBlockRes = runCli(sandboxRoot, ["hook", "run", "--agent"], {
+    input: JSON.stringify({ terminationReason: "NO_TOOL_CALL" }),
+  });
+  const ruffBlockJson = JSON.parse(ruffBlockRes.stdout.trim());
+  assert.equal(ruffBlockJson.decision, "continue");
+  assert.ok(ruffBlockJson.reason.includes("[ruff]"), "Reason should include [ruff]");
+  assert.ok(ruffBlockJson.reason.includes("src/app.py:3:8"), "Reason should include src/app.py:3:8");
+  assert.ok(ruffBlockJson.reason.includes("F401"), "Reason should include F401");
+  assert.ok(ruffBlockJson.reason.includes("imported but unused"), "Reason should include imported but unused");
+
+  // 8d. ESLint (JS/TS Linter) blocking on NO_TOOL_CALL
+  fs.writeFileSync(path.join(sandboxRoot, "eslint.config.js"), "export default [];\n", "utf8");
+  const nodeBinDir = path.join(sandboxRoot, "node_modules", ".bin");
+  fs.mkdirSync(nodeBinDir, { recursive: true });
+  const eslintBin = path.join(nodeBinDir, "eslint");
+  const eslintPayload = JSON.stringify([
+    {
+      filePath: "src/index.js",
+      errorCount: 1,
+      warningCount: 0,
+      messages: [
+        {
+          ruleId: "no-unused-vars",
+          severity: 2,
+          message: "'x' is assigned a value but never used.",
+          line: 7,
+          column: 10,
+        },
+      ],
+    },
+  ]).replace(/'/g, "'\\''");
+  fs.writeFileSync(
+    eslintBin,
+    `#!/bin/sh\nprintf '%s\\n' '${eslintPayload}'\nexit 1\n`,
+    { mode: 0o755 }
+  );
+  fs.chmodSync(eslintBin, 0o755);
+
+  const eslintBlockRes = runCli(sandboxRoot, ["hook", "run", "--agent"], {
+    input: JSON.stringify({ terminationReason: "NO_TOOL_CALL" }),
+  });
+  const eslintBlockJson = JSON.parse(eslintBlockRes.stdout.trim());
+  assert.equal(eslintBlockJson.decision, "continue");
+  assert.ok(eslintBlockJson.reason.includes("[eslint]"), "Reason should include [eslint]");
+  assert.ok(eslintBlockJson.reason.includes("src/index.js:7:10"), "Reason should include src/index.js:7:10");
+  assert.ok(eslintBlockJson.reason.includes("no-unused-vars"), "Reason should include no-unused-vars");
+  assert.ok(eslintBlockJson.reason.includes("never used"), "Reason should include never used");
+
+  // 8e. Clean pass when both Ruff and ESLint output []
+  fs.writeFileSync(
+    ruffBin,
+    `#!/bin/sh\nprintf '%s\\n' '[]'\nexit 0\n`,
+    { mode: 0o755 }
+  );
+  fs.writeFileSync(
+    eslintBin,
+    `#!/bin/sh\nprintf '%s\\n' '[]'\nexit 0\n`,
+    { mode: 0o755 }
+  );
+  fs.chmodSync(ruffBin, 0o755);
+  fs.chmodSync(eslintBin, 0o755);
+
+  const linterCleanRes = runCli(sandboxRoot, ["hook", "run", "--agent"], {
+    input: JSON.stringify({ terminationReason: "NO_TOOL_CALL" }),
+  });
+  assert.equal(linterCleanRes.status, 0);
+  const linterCleanJson = JSON.parse(linterCleanRes.stdout.trim());
+  assert.equal(linterCleanJson.decision, "stop");
+
   console.log("✓ All black-box integration contract tests passed.");
   } finally {
     // Clean up test sandbox

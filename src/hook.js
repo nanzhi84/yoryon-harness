@@ -154,15 +154,21 @@ export function checkStaticTypes(targetRoot = process.cwd()) {
 
   const hasPyproject = fs.existsSync(path.join(targetRoot, "pyproject.toml"));
   const hasPyrightConfig = fs.existsSync(path.join(targetRoot, "pyrightconfig.json"));
+  const hasRuffConfig =
+    fs.existsSync(path.join(targetRoot, "ruff.toml")) ||
+    fs.existsSync(path.join(targetRoot, ".ruff.toml"));
   const venvPyright = path.join(targetRoot, ".venv", "bin", "pyright");
   const venvPython = path.join(targetRoot, ".venv", "bin", "python");
   const venvPyrefly = path.join(targetRoot, ".venv", "bin", "pyrefly");
+  const venvRuff = path.join(targetRoot, ".venv", "bin", "ruff");
 
   const isPythonProject =
     hasPyproject ||
     hasPyrightConfig ||
+    hasRuffConfig ||
     isExecutableFile(venvPyright) ||
-    isExecutableFile(venvPyrefly);
+    isExecutableFile(venvPyrefly) ||
+    isExecutableFile(venvRuff);
 
   if (isPythonProject) {
     let pyrightCmd = null;
@@ -283,6 +289,139 @@ export function checkStaticTypes(targetRoot = process.cwd()) {
         }
       } catch {
         // Ignore if pyrefly execution fails to return JSON
+      }
+    }
+
+    // Ruff Python Linter check
+    const ruffBin = isExecutableFile(venvRuff)
+      ? venvRuff
+      : findInPath("ruff");
+    if (ruffBin) {
+      try {
+        const procRuff = spawnSync(
+          ruffBin,
+          ["check", "--output-format=json"],
+          {
+            cwd: targetRoot,
+            encoding: "utf8",
+            timeout: 15000,
+          }
+        );
+        if (procRuff.stdout) {
+          const ruffReport = JSON.parse(procRuff.stdout);
+          const ruffItems = Array.isArray(ruffReport) ? ruffReport : [];
+          for (const item of ruffItems.slice(0, 30)) {
+            if (!item || typeof item !== "object") continue;
+            errorCount += 1;
+            const rawFile = String(item.filename || "");
+            let relPath = rawFile;
+            if (rawFile) {
+              try {
+                const candidateRel = path.relative(
+                  targetRoot,
+                  path.resolve(targetRoot, rawFile)
+                );
+                if (!candidateRel.startsWith("..")) {
+                  relPath = candidateRel.split(path.sep).join("/");
+                }
+              } catch {
+                relPath = rawFile;
+              }
+            }
+            const loc =
+              item.location && typeof item.location === "object"
+                ? item.location
+                : {};
+            const lineNo = Number(loc.row || 1);
+            const colNo = Number(loc.column || 1);
+            const code = String(item.code || "");
+            const codeSuffix = code ? ` (${code})` : "";
+            const msg = String(item.message || "").replace(/\r?\n/g, " ");
+            issues.push(
+              `- [ruff] ${relPath}:${lineNo}:${colNo} [error]${codeSuffix} ${msg}`
+            );
+          }
+        }
+      } catch {
+        // Ignore if ruff execution fails to return JSON
+      }
+    }
+  }
+
+  // ESLint JS/TS Linter check (if eslint config exists)
+  const eslintConfigFiles = [
+    "eslint.config.js",
+    "eslint.config.mjs",
+    "eslint.config.cjs",
+    "eslint.config.ts",
+    ".eslintrc",
+    ".eslintrc.js",
+    ".eslintrc.cjs",
+    ".eslintrc.json",
+    ".eslintrc.yaml",
+    ".eslintrc.yml",
+  ];
+  const hasEslintConfig = eslintConfigFiles.some((f) =>
+    fs.existsSync(path.join(targetRoot, f))
+  );
+  if (hasEslintConfig) {
+    const localEslint = path.join(targetRoot, "node_modules", ".bin", "eslint");
+    const eslintBin = isExecutableFile(localEslint)
+      ? localEslint
+      : findInPath("eslint");
+    if (eslintBin) {
+      try {
+        const procEslint = spawnSync(eslintBin, [".", "--format=json"], {
+          cwd: targetRoot,
+          encoding: "utf8",
+          timeout: 25000,
+        });
+        if (procEslint.stdout) {
+          const eslintReport = JSON.parse(procEslint.stdout);
+          const filesList = Array.isArray(eslintReport) ? eslintReport : [];
+          for (const fileEntry of filesList) {
+            if (!fileEntry || typeof fileEntry !== "object") continue;
+            const rawFile = String(fileEntry.filePath || "");
+            let relPath = rawFile;
+            if (rawFile) {
+              try {
+                const candidateRel = path.relative(
+                  targetRoot,
+                  path.resolve(targetRoot, rawFile)
+                );
+                if (!candidateRel.startsWith("..")) {
+                  relPath = candidateRel.split(path.sep).join("/");
+                }
+              } catch {
+                relPath = rawFile;
+              }
+            }
+            const messages = Array.isArray(fileEntry.messages)
+              ? fileEntry.messages
+              : [];
+            for (const m of messages.slice(0, 30)) {
+              if (!m || typeof m !== "object") continue;
+              const sevNum = Number(m.severity || 1);
+              if (sevNum < 1) continue;
+              const sev = sevNum >= 2 ? "error" : "warning";
+              if (sev === "error") {
+                errorCount += 1;
+              } else {
+                warningCount += 1;
+              }
+              const lineNo = Number(m.line || 1);
+              const colNo = Number(m.column || 1);
+              const ruleId = String(m.ruleId || "");
+              const ruleSuffix = ruleId ? ` (${ruleId})` : "";
+              const msg = String(m.message || "").replace(/\r?\n/g, " ");
+              issues.push(
+                `- [eslint] ${relPath}:${lineNo}:${colNo} [${sev}]${ruleSuffix} ${msg}`
+              );
+            }
+          }
+        }
+      } catch {
+        // Ignore if eslint execution fails to return JSON
       }
     }
   }
