@@ -91,6 +91,7 @@ export function cleanSandboxes(targetRoot = process.cwd(), options = {}) {
   const all = Boolean(options.all);
   const dryRun = Boolean(options.dryRun);
   const quiet = Boolean(options.quiet);
+  const silent = Boolean(options.silent);
   const maxAgeSpec =
     options.maxAge !== undefined
       ? options.maxAge
@@ -115,7 +116,7 @@ export function cleanSandboxes(targetRoot = process.cwd(), options = {}) {
 
     const entries = fs
       .readdirSync(sandboxDir)
-      .filter((name) => !PROTECTED_NAMES.has(name))
+      .filter((name) => !PROTECTED_NAMES.has(name) && !name.startsWith("."))
       .map((name) => {
         const fullPath = path.join(sandboxDir, name);
         const relPath = path.join(dirName, name);
@@ -141,7 +142,7 @@ export function cleanSandboxes(targetRoot = process.cwd(), options = {}) {
     });
   }
 
-  if (removed.length > 0 || !quiet) {
+  if (!silent && (removed.length > 0 || !quiet)) {
     const prefix = dryRun ? "[harness clean --dry-run]" : "[harness clean]";
     if (removed.length === 0) {
       console.log(

@@ -15,10 +15,10 @@ Usage:
 Commands:
   init [--force]                                Initialize Universal Harness directories & docs in current repo
   sync                                          Sync latest AGENTS.md and docs/README.md without touching project files
-  doctor [--json]                               Check directory conventions, doc/text rules, and dead links
-  rule [--all | <CODE>]                         Explain Harness check rules (HAR001, GIT001, ARC001, SPC001, ADR001/002, REF001, LNK001/002, VOX001, SUP001)
+  doctor [--json]                               Check directory conventions, doc/text rules, test contracts, and dead links
+  rule [--all | <CODE>]                         Explain Harness check rules (HAR001, GIT001, ARC001, SPC001, ADR001/002, REF001, LNK001/002, VOX001, SUP001, TST001/002)
   hook install [--git] [--agents]               Install Git pre-commit hook and/or .agents/hooks.json Stop hook for auto-repair & TTL cleanup
-  hook run [--agent]                            Execute TTL sandbox cleanup + hook check (outputs Antigravity Stop hook JSON in --agent mode)
+  hook run [--agent]                            Execute TTL sandbox cleanup + doctor + static typecheck (outputs Antigravity Stop hook JSON in --agent mode)
   clean [--all] [--max-age 12h] [--keep <N>]    Clean expired or all intermediate files in work/ and artifacts/
   run <task-name> -- <cmd> [args...]            Run verification command in isolated work/ & artifacts/ sandbox with receipt
   spec new <issue#<N>> [--title] [--module]     Create an issue-aligned spec directory (docs/spec/issue#<N>/spec.md)

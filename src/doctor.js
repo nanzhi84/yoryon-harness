@@ -76,8 +76,22 @@ export const RULES = {
     code: "SUP001",
     title: "Invalid or unreasoned harness-ignore suppression",
     summary:
-      "Suppression comments must follow `<!-- harness-ignore CODE: reason -->` with a valid rule code and a non-empty reason.",
-    fix: "Format the comment as `<!-- harness-ignore CODE: explain why this exception is needed -->`.",
+      "Suppression comments must follow `<!-- harness-ignore CODE: reason -->` (or `# harness-ignore CODE: reason` / `// harness-ignore CODE: reason` in test files) with a valid rule code and a non-empty reason.",
+    fix: "Format the comment as `<!-- harness-ignore CODE: explain why this exception is needed -->` (or `# harness-ignore CODE: reason` in code).",
+  },
+  TST001: {
+    code: "TST001",
+    title: "Invalid test file naming or missing Test<Subject> class hierarchy",
+    summary:
+      "Test files in `tests/` must be named by domain capability (`tests/test_<domain>.py`, never `test_phase1.py` or `test1.py`) and group Python test functions inside `class Test<Subject>:` with `def test_<scenario>_<expected>()`.",
+    fix: "Rename the file to `tests/test_<domain>.py` and wrap top-level `def test_*` functions inside `class Test<Subject>:` with two-part `def test_<scenario>_<expected>()` names.",
+  },
+  TST002: {
+    code: "TST002",
+    title: "Forbidden mocking or monkeypatching of business logic in tests",
+    summary:
+      "Detects mocking frameworks and attribute monkeypatching (`unittest.mock`, `MagicMock`, `AsyncMock`, `@patch`, `mocker.patch`, `monkeypatch.setattr`, `jest.mock`, `vi.mock`, `sinon.stub`) in `tests/`. Environment variable overrides like `monkeypatch.setenv` / `monkeypatch.delenv` are allowed.",
+    fix: "Replace mocks/stubs with real black-box fixtures or local test servers, or add `# harness-ignore TST002: <reason>` (or `// harness-ignore TST002: <reason>`) if justified.",
   },
 };
 
@@ -750,6 +764,205 @@ export function checkWorkspace(targetRoot = process.cwd()) {
             line,
             `Broken anchor '#${fragment}' in link '${target}' (target '${path.relative(effectiveRoot, resolvedAbs)}' has no matching heading).`
           );
+        }
+      }
+    }
+  }
+
+  // 8. TST001, TST002, and SUP001 in tests/
+  const testsDir = path.join(targetRoot, "tests");
+  if (fs.existsSync(testsDir) && fs.statSync(testsDir).isDirectory()) {
+    const ignoredTestSubdirs = new Set([
+      "__pycache__",
+      ".pytest_cache",
+      "fixtures",
+      "node_modules",
+    ]);
+    const testCodeFiles = [];
+    const walkTests = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === ".gitkeep" || entry.name === ".DS_Store") continue;
+        if (entry.isDirectory()) {
+          if (ignoredTestSubdirs.has(entry.name)) continue;
+          walkTests(path.join(dir, entry.name));
+        } else if (
+          entry.isFile() &&
+          /\.(?:py|js|mjs|cjs|ts)$/i.test(entry.name)
+        ) {
+          testCodeFiles.push(path.join(dir, entry.name));
+        }
+      }
+    };
+    walkTests(testsDir);
+
+    const FORBIDDEN_MOCK_PATTERNS = [
+      {
+        regex: /\bunittest\.mock\b/,
+        label: "unittest.mock",
+      },
+      {
+        regex: /\b(?:MagicMock|AsyncMock|NonCallableMock|PropertyMock)\b/,
+        label: "MagicMock/AsyncMock",
+      },
+      {
+        regex: /@(?:unittest\.mock\.|mock\.)?patch\b/,
+        label: "@patch decorator",
+      },
+      {
+        regex: /\bpatch\.(?:object|dict|multiple)\s*\(/,
+        label: "patch.object/dict/multiple",
+      },
+      {
+        regex: /\bmocker\.(?:patch|spy|stub)\b/,
+        label: "mocker.patch/spy/stub",
+      },
+      {
+        regex: /\bmonkeypatch\.(?:setattr|delattr)\s*\(/,
+        label: "monkeypatch.setattr/delattr",
+      },
+      {
+        regex: /\b(?:jest|vi)\.(?:mock|spyOn|fn)\s*\(/,
+        label: "jest/vi.mock/spyOn/fn",
+      },
+      {
+        regex: /\bsinon\.(?:stub|mock|spy)\s*\(/,
+        label: "sinon.stub/mock/spy",
+      },
+    ];
+
+    for (const testAbs of testCodeFiles) {
+      const relFile = path.relative(targetRoot, testAbs).split(path.sep).join("/");
+      const baseName = path.basename(testAbs);
+      const isPy = baseName.endsWith(".py");
+      const content = fs.readFileSync(testAbs, "utf8");
+      const lines = content.split(/\r?\n/);
+
+      // Scan code comment suppressions: # harness-ignore CODE: reason or // harness-ignore CODE: reason
+      const suppressedTestRules = new Set();
+      for (let i = 0; i < lines.length; i++) {
+        const lineNum = i + 1;
+        const trimmed = lines[i].trim();
+        const commentMatch = trimmed.match(
+          /^(?:#|\/\/|\/\*+)\s*harness-ignore\b(.*)$/
+        );
+        if (commentMatch) {
+          const rawBody = commentMatch[1].replace(/\*+\/\s*$/, "").trim();
+          const parsed = rawBody.match(/^([A-Z]{3}\d{3})\s*:\s*(.+)$/);
+          if (!parsed || !RULES[parsed[1]] || !parsed[2].trim()) {
+            addDiag(
+              "SUP001",
+              relFile,
+              lineNum,
+              "Invalid `harness-ignore` comment in test file; must specify a valid rule code and reason (`# harness-ignore CODE: reason`)."
+            );
+          } else {
+            suppressedTestRules.add(parsed[1]);
+          }
+        }
+      }
+
+      // TST001: File naming & Python class/method hierarchy
+      if (!suppressedTestRules.has("TST001")) {
+        const isPyTestFile =
+          isPy &&
+          baseName !== "__init__.py" &&
+          baseName !== "conftest.py" &&
+          (/^test/i.test(baseName) ||
+            /_test\.py$/i.test(baseName) ||
+            /(?:^|\n)\s*(?:async\s+)?def\s+test_|(?:^|\n)\s*class\s+Test/.test(
+              content
+            ));
+
+        const isPhaseOrNumberNamed =
+          /^(?:test[_-]?)?(?:phase|step|stage|part|iter|sprint)[_-]?\d+/i.test(
+            baseName
+          ) ||
+          /^test[_-]?\d+(?:[_.-]|$)/i.test(baseName) ||
+          /(?:^|[._-])(?:phase|step|stage)[_-]?\d+\.(?:test|spec)\.[jt]s$/i.test(
+            baseName
+          );
+
+        if (isPhaseOrNumberNamed) {
+          addDiag(
+            "TST001",
+            relFile,
+            1,
+            `Test file '${baseName}' uses phase/step/sequence naming; name test files by domain capability (e.g., 'tests/test_<domain>.py').`
+          );
+        } else if (isPyTestFile && !/^test_[a-z][a-z0-9_]*\.py$/.test(baseName)) {
+          addDiag(
+            "TST001",
+            relFile,
+            1,
+            `Python test file '${baseName}' must match 'tests/test_<domain>.py' domain naming convention.`
+          );
+        }
+
+        if (isPyTestFile) {
+          for (let i = 0; i < lines.length; i++) {
+            const lineNum = i + 1;
+            const rawLine = lines[i];
+            if (/^\s*#/.test(rawLine)) continue;
+
+            // Top-level test function (not inside class Test<Subject>:)
+            const topDefMatch = rawLine.match(
+              /^(?:async\s+)?def\s+(test_[A-Za-z0-9_]*)\s*\(/
+            );
+            if (topDefMatch) {
+              addDiag(
+                "TST001",
+                relFile,
+                lineNum,
+                `Top-level test function '${topDefMatch[1]}' must be grouped inside a 'class Test<Subject>:' hierarchy.`
+              );
+              continue;
+            }
+
+            // Indented test method inside class: require at least two parts after test_ (<scenario>_<expected>)
+            const methodDefMatch = rawLine.match(
+              /^\s+(?:async\s+)?def\s+(test_[A-Za-z0-9_]*)\s*\(/
+            );
+            if (methodDefMatch) {
+              const fnName = methodDefMatch[1];
+              const suffix = fnName.slice("test_".length);
+              if (!suffix.includes("_") || /^_+$/.test(suffix)) {
+                addDiag(
+                  "TST001",
+                  relFile,
+                  lineNum,
+                  `Test method '${fnName}' must follow 'def test_<scenario>_<expected>()' naming covering both scenario and expected outcome.`
+                );
+              }
+            }
+          }
+        }
+      }
+
+      // TST002: Forbidden mocking or business attribute monkeypatching
+      if (!suppressedTestRules.has("TST002")) {
+        for (let i = 0; i < lines.length; i++) {
+          const lineNum = i + 1;
+          const rawLine = lines[i];
+          const trimmed = rawLine.trim();
+          if (
+            trimmed.startsWith("#") ||
+            trimmed.startsWith("//") ||
+            trimmed.startsWith("/*") ||
+            trimmed.startsWith("*")
+          ) {
+            continue;
+          }
+          for (const pat of FORBIDDEN_MOCK_PATTERNS) {
+            if (pat.regex.test(rawLine)) {
+              addDiag(
+                "TST002",
+                relFile,
+                lineNum,
+                `Forbidden mock/monkeypatch usage (${pat.label}) detected in '${relFile}'; use real black-box fixtures or local test servers instead.`
+              );
+              break;
+            }
+          }
         }
       }
     }
