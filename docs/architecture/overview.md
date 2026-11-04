@@ -27,7 +27,7 @@ flowchart TD
 - [src/init.js](../../src/init.js)：负责 `harness init` 与 `harness sync`，从 [templates/](../../templates) 读取母本并向目标仓库写入目录与通用规范。
 - [src/doctor.js](../../src/doctor.js)：负责 `harness doctor` 与 `harness rule`，执行目录契约、生命周期位置、三列索引、测试命名与反 Mock 契约（`TST001`/`TST002`）及 Markdown 本地死链/锚点检查。
 - [src/hook.js](../../src/hook.js)：负责 `harness hook install` 与 `harness hook run --agent`，通过 Git `pre-commit`、`reference-transaction` 与 Agent `Stop` 钩子自动清理过期沙盒产物与悬空 Git worktree 元数据、运行文档与测试契约巡检及多语言静态类型/Linter 检查（Pyright/Pyrefly/Ruff/ESLint/TSC），拦截违规并驱动模型自修复。
-- [src/clean.js](../../src/clean.js)：负责 `harness clean`（含 `--worktrees`）及生命周期钩子触发的 `work/`、`artifacts/` 中间产物 TTL / 数量配额清理（保护 `.gitkeep` 与 `.gitignore`），以及基于 `<common_git_dir>/worktrees/*/gitdir` 的孤儿 worktree 空壳目录、`.git/worktrees/` 悬空元数据、`.git/info/refs` 与空命名空间引用目录回收。
+- [src/clean.js](../../src/clean.js)：负责 `harness clean`（含 `--worktrees`）及生命周期钩子触发的 `work/`、`artifacts/` 中间产物 TTL / 数量配额清理（保护 `.gitkeep` 与 `.gitignore`），以及基于 `<common_git_dir>/worktrees/*/gitdir` 与声明式多 Agent 路径模板（`DEFAULT_AGENT_WORKTREE_SPECS` 及 `.agents/harness.json`）的孤儿 worktree 空壳目录、`.git/worktrees/` 悬空元数据、项目环境注册表失效 `environments` 条目、`.git/info/refs` 与空命名空间引用目录回收。
 - [src/run.js](../../src/run.js)：负责 `harness run`，接管验收命令的隔离沙盒目录创建、过期产物惰性清理、环境变量注入与回执落盘。
 - [src/scaffold.js](../../src/scaffold.js)：负责 `harness spec new`、`harness adr new` 与 `harness adr supersede` 的确定性文档流转。
 

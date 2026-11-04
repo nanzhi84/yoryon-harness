@@ -1,12 +1,15 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const SANDBOX_DIRS = ["work", "artifacts", ".agents/teamwork"];
 const PROTECTED_NAMES = new Set([".gitkeep", ".gitignore"]);
 const PROTECTED_AGENTS_NAMES = new Set([
   "hooks",
   "hooks.json",
+  "harness.json",
   "rules",
   "skills",
   "workflows",
@@ -18,6 +21,35 @@ const PROTECTED_AGENTS_NAMES = new Set([
   ".gitignore",
 ]);
 const DEFAULT_MAX_AGE = "12h";
+
+/**
+ * Declarative multi-agent worktree location and project registry specs.
+ * Supports `{home}`, `~`, `{repo}` (repository directory name), and `{repoRoot}` (full repository path).
+ * Additional or custom agent specs can be declared in `~/.config/harness/config.json` or `<repo>/.agents/harness.json`
+ * under `"worktreeAgents": [{ "agent": "...", "worktreeContainers": [...], "projectRegistryDirs": [...] }]`.
+ */
+export const DEFAULT_AGENT_WORKTREE_SPECS = [
+  {
+    agent: "antigravity",
+    worktreeContainers: ["~/.gemini/antigravity/worktrees/{repo}"],
+    projectRegistryDirs: ["~/.gemini/config/projects"],
+  },
+  {
+    agent: "cursor",
+    worktreeContainers: ["~/.cursor/worktrees/{repo}"],
+    projectRegistryDirs: [],
+  },
+  {
+    agent: "claude-code",
+    worktreeContainers: ["{repoRoot}/.claude/worktrees", "~/.claude/worktrees/{repo}"],
+    projectRegistryDirs: [],
+  },
+  {
+    agent: "codex",
+    worktreeContainers: ["~/.codex/worktrees/{repo}"],
+    projectRegistryDirs: [],
+  },
+];
 
 /**
  * Parse human-readable duration strings (e.g. "30m", "12h", "7d", "3600s") into milliseconds.
@@ -272,9 +304,226 @@ function pruneEmptySubdirs(rootDir) {
   }
 }
 
+function safeRealpath(targetPath) {
+  try {
+    return fs.realpathSync(targetPath);
+  } catch {
+    return path.resolve(targetPath);
+  }
+}
+
+function uriToFsPath(uri) {
+  if (typeof uri !== "string" || !uri.trim()) {
+    return null;
+  }
+  const trimmed = uri.trim();
+  if (trimmed.startsWith("file://")) {
+    try {
+      return path.resolve(fileURLToPath(trimmed));
+    } catch {
+      return null;
+    }
+  }
+  return path.resolve(trimmed);
+}
+
+function hasValidWorktreeGitLink(dirPath) {
+  const dotGitPath = path.join(dirPath, ".git");
+  if (!fs.existsSync(dotGitPath)) {
+    return false;
+  }
+  try {
+    const stat = fs.lstatSync(dotGitPath);
+    if (stat.isDirectory()) {
+      return true;
+    }
+    if (stat.isFile()) {
+      const content = fs.readFileSync(dotGitPath, "utf8").trim();
+      const match = content.match(/^gitdir:\s*(.+)$/m);
+      if (!match) {
+        return false;
+      }
+      const targetMetaDir = path.resolve(dirPath, match[1].trim());
+      return fs.existsSync(targetMetaDir) && fs.existsSync(path.join(targetMetaDir, "gitdir"));
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function resolveMainRepoBranch(commonGitDir) {
+  const headFile = path.join(commonGitDir, "HEAD");
+  try {
+    if (fs.existsSync(headFile)) {
+      const raw = fs.readFileSync(headFile, "utf8").trim();
+      const match = raw.match(/^ref:\s*refs\/heads\/(.+)$/);
+      if (match && match[1]) {
+        return match[1].trim();
+      }
+    }
+  } catch {
+    // Ignore read errors
+  }
+  if (fs.existsSync(path.join(commonGitDir, "refs", "heads", "main"))) {
+    return "main";
+  }
+  return null;
+}
+
+function gitBranchExists(commonGitDir, branchName) {
+  if (!branchName || typeof branchName !== "string") {
+    return false;
+  }
+  const looseRef = path.join(commonGitDir, "refs", "heads", branchName);
+  if (fs.existsSync(looseRef) && fs.statSync(looseRef).isFile()) {
+    return true;
+  }
+  const packedRefs = path.join(commonGitDir, "packed-refs");
+  try {
+    if (fs.existsSync(packedRefs)) {
+      const content = fs.readFileSync(packedRefs, "utf8");
+      const escaped = branchName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`^[0-9a-f]{40,64}\\s+refs/heads/${escaped}\\s*$`, "m");
+      return re.test(content);
+    }
+  } catch {
+    // Ignore packed-refs read errors
+  }
+  return false;
+}
+
+function removeEmptyParentContainer(wtPhysicalDir, mainRepoRoot, dryRun) {
+  const parentDir = path.dirname(wtPhysicalDir);
+  if (
+    parentDir &&
+    path.resolve(parentDir) !== path.resolve(mainRepoRoot) &&
+    path.resolve(parentDir) !== path.parse(parentDir).root &&
+    fs.existsSync(parentDir)
+  ) {
+    try {
+      const siblings = fs.readdirSync(parentDir).filter((n) => n !== ".DS_Store");
+      if (siblings.length === 0 && !dryRun) {
+        fs.rmSync(parentDir, { recursive: true, force: true });
+      }
+    } catch {
+      // Ignore parent cleanup errors
+    }
+  }
+}
+
+export function expandWorktreeTemplate(template, { repoRoot, homeDir = os.homedir() }) {
+  if (typeof template !== "string" || !template.trim()) {
+    return null;
+  }
+  const repoName = path.basename(repoRoot);
+  let expanded = template.trim();
+  if (expanded === "~") {
+    expanded = homeDir;
+  } else if (expanded.startsWith("~/") || expanded.startsWith("~\\")) {
+    expanded = path.join(homeDir, expanded.slice(2));
+  }
+  expanded = expanded
+    .replace(/\{home\}/g, homeDir)
+    .replace(/\{repoRoot\}/g, repoRoot)
+    .replace(/\{repo\}/g, repoName);
+  return path.resolve(repoRoot, expanded);
+}
+
+function loadJsonSpecsFromFile(configPath) {
+  try {
+    if (!configPath || !fs.existsSync(configPath) || !fs.statSync(configPath).isFile()) {
+      return [];
+    }
+    const parsed = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    const specs = [];
+    if (Array.isArray(parsed?.worktreeAgents)) {
+      specs.push(...parsed.worktreeAgents);
+    }
+    if (Array.isArray(parsed?.worktreeContainers) || Array.isArray(parsed?.projectRegistryDirs)) {
+      specs.push({
+        agent: "custom-config",
+        worktreeContainers: Array.isArray(parsed.worktreeContainers) ? parsed.worktreeContainers : [],
+        projectRegistryDirs: Array.isArray(parsed.projectRegistryDirs)
+          ? parsed.projectRegistryDirs
+          : [],
+      });
+    }
+    return specs;
+  } catch {
+    return [];
+  }
+}
+
+export function resolveAgentWorktreePaths(mainRepoRoot, options = {}) {
+  const homeDir = options.homeDir || os.homedir();
+  const baseSpecs = Array.isArray(options.agentSpecs)
+    ? options.agentSpecs
+    : DEFAULT_AGENT_WORKTREE_SPECS;
+
+  const globalConfigPath =
+    options.configPath ||
+    process.env.HARNESS_CONFIG_PATH ||
+    path.join(homeDir, ".config", "harness", "config.json");
+  const repoConfigPath = path.join(mainRepoRoot, ".agents", "harness.json");
+
+  const combinedSpecs = [
+    ...baseSpecs,
+    ...loadJsonSpecsFromFile(globalConfigPath),
+    ...loadJsonSpecsFromFile(repoConfigPath),
+  ];
+
+  const containerDirs = new Set();
+  const registryDirs = new Set();
+
+  for (const spec of combinedSpecs) {
+    const containers = Array.isArray(spec?.worktreeContainers) ? spec.worktreeContainers : [];
+    for (const tpl of containers) {
+      const resolved = expandWorktreeTemplate(tpl, { repoRoot: mainRepoRoot, homeDir });
+      if (resolved) containerDirs.add(resolved);
+    }
+    const registries = Array.isArray(spec?.projectRegistryDirs)
+      ? spec.projectRegistryDirs
+      : spec?.projectRegistryDir
+      ? [spec.projectRegistryDir]
+      : [];
+    for (const tpl of registries) {
+      const resolved = expandWorktreeTemplate(tpl, { repoRoot: mainRepoRoot, homeDir });
+      if (resolved) registryDirs.add(resolved);
+    }
+  }
+
+  if (options.worktreesRootDir) {
+    const resolved = expandWorktreeTemplate(
+      path.join(String(options.worktreesRootDir), "{repo}"),
+      { repoRoot: mainRepoRoot, homeDir }
+    );
+    if (resolved) containerDirs.add(resolved);
+  }
+  if (Array.isArray(options.worktreeContainers)) {
+    for (const tpl of options.worktreeContainers) {
+      const resolved = expandWorktreeTemplate(tpl, { repoRoot: mainRepoRoot, homeDir });
+      if (resolved) containerDirs.add(resolved);
+    }
+  }
+  if (options.projectsConfigDir) {
+    const resolved = expandWorktreeTemplate(String(options.projectsConfigDir), {
+      repoRoot: mainRepoRoot,
+      homeDir,
+    });
+    if (resolved) registryDirs.add(resolved);
+  }
+
+  return {
+    worktreeContainerDirs: [...containerDirs],
+    projectRegistryDirs: [...registryDirs],
+  };
+}
+
 /**
  * Reconcile and prune stale Git worktree metadata (.git/worktrees/*),
- * orphaned ghost worktree directories, .git/info/refs, and empty ref namespaces.
+ * orphaned ghost worktree directories across configured Agents,
+ * IDE project worktree registries, .git/info/refs, and empty ref namespaces.
  */
 export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
   const dryRun = Boolean(options.dryRun);
@@ -287,16 +536,30 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
   }
 
   const mainRepoRoot = path.dirname(commonGitDir);
+  const mainRepoReal = safeRealpath(mainRepoRoot);
   const worktreesMetaDir = path.join(commonGitDir, "worktrees");
   const prunedWorktrees = [];
   const removedGhostDirs = [];
+  const activeWorktreePaths = new Set([path.resolve(mainRepoRoot), mainRepoReal]);
+
+  const recordPruned = (name) => {
+    if (name && !prunedWorktrees.includes(name)) {
+      prunedWorktrees.push(name);
+    }
+  };
+  const recordGhostDir = (dirPath) => {
+    const resolved = path.resolve(dirPath);
+    if (!removedGhostDirs.includes(resolved)) {
+      removedGhostDirs.push(resolved);
+    }
+  };
 
   if (fs.existsSync(worktreesMetaDir) && fs.statSync(worktreesMetaDir).isDirectory()) {
     for (const wtName of fs.readdirSync(worktreesMetaDir)) {
       const wtEntryDir = path.join(worktreesMetaDir, wtName);
       try {
         if (!fs.statSync(wtEntryDir).isDirectory()) continue;
-        if (fs.existsSync(path.join(wtEntryDir, "locked"))) continue;
+        const isLocked = fs.existsSync(path.join(wtEntryDir, "locked"));
 
         const gitdirFile = path.join(wtEntryDir, "gitdir");
         if (!fs.existsSync(gitdirFile)) continue;
@@ -307,35 +570,23 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
         const wtGitFile = path.resolve(wtEntryDir, rawTarget);
         const wtPhysicalDir = path.dirname(wtGitFile);
 
-        if (!fs.existsSync(wtGitFile)) {
-          prunedWorktrees.push(wtName);
-          if (
-            fs.existsSync(wtPhysicalDir) &&
-            path.resolve(wtPhysicalDir) !== path.resolve(mainRepoRoot)
-          ) {
-            if (!dryRun) {
-              fs.rmSync(wtPhysicalDir, { recursive: true, force: true });
-            }
-            removedGhostDirs.push(wtPhysicalDir);
-          }
-
-          const parentDir = path.dirname(wtPhysicalDir);
-          if (
-            parentDir &&
-            path.resolve(parentDir) !== path.resolve(mainRepoRoot) &&
-            path.resolve(parentDir) !== path.parse(parentDir).root &&
-            fs.existsSync(parentDir)
-          ) {
-            try {
-              const siblings = fs.readdirSync(parentDir).filter((n) => n !== ".DS_Store");
-              if (siblings.length === 0 && !dryRun) {
-                fs.rmSync(parentDir, { recursive: true, force: true });
-              }
-            } catch {
-              // Ignore parent cleanup errors
-            }
-          }
+        if (isLocked || (fs.existsSync(wtGitFile) && fs.existsSync(wtPhysicalDir))) {
+          activeWorktreePaths.add(path.resolve(wtPhysicalDir));
+          activeWorktreePaths.add(safeRealpath(wtPhysicalDir));
+          continue;
         }
+
+        recordPruned(wtName);
+        if (
+          fs.existsSync(wtPhysicalDir) &&
+          path.resolve(wtPhysicalDir) !== path.resolve(mainRepoRoot)
+        ) {
+          if (!dryRun) {
+            fs.rmSync(wtPhysicalDir, { recursive: true, force: true });
+          }
+          recordGhostDir(wtPhysicalDir);
+        }
+        removeEmptyParentContainer(wtPhysicalDir, mainRepoRoot, dryRun);
       } catch {
         // Ignore transient worktree metadata errors
       }
@@ -348,6 +599,153 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
       encoding: "utf8",
       timeout: 5000,
     });
+  }
+
+  const { worktreeContainerDirs, projectRegistryDirs } = resolveAgentWorktreePaths(
+    mainRepoRoot,
+    options
+  );
+
+  // Sweep orphaned ghost worktree directories across all declaratively configured Agent containers
+  for (const repoWorktreesDir of worktreeContainerDirs) {
+    if (!fs.existsSync(repoWorktreesDir) || !fs.statSync(repoWorktreesDir).isDirectory()) {
+      continue;
+    }
+    for (const entryName of fs.readdirSync(repoWorktreesDir)) {
+      if (entryName === ".DS_Store") continue;
+      const entryPath = path.join(repoWorktreesDir, entryName);
+      try {
+        if (!fs.statSync(entryPath).isDirectory()) continue;
+        const resolvedEntry = path.resolve(entryPath);
+        const realEntry = safeRealpath(entryPath);
+        if (activeWorktreePaths.has(resolvedEntry) || activeWorktreePaths.has(realEntry)) {
+          continue;
+        }
+        if (!hasValidWorktreeGitLink(entryPath)) {
+          if (!dryRun) {
+            fs.rmSync(entryPath, { recursive: true, force: true });
+          }
+          recordPruned(entryName);
+          recordGhostDir(entryPath);
+        }
+      } catch {
+        // Ignore transient directory errors
+      }
+    }
+    try {
+      const remaining = fs.readdirSync(repoWorktreesDir).filter((n) => n !== ".DS_Store");
+      if (remaining.length === 0 && !dryRun) {
+        fs.rmSync(repoWorktreesDir, { recursive: true, force: true });
+      }
+    } catch {
+      // Ignore parent cleanup errors
+    }
+  }
+
+  // Reconcile stale worktree entries across all declaratively configured Agent project registries
+  const mainBranch = resolveMainRepoBranch(commonGitDir);
+  for (const projectsConfigDir of projectRegistryDirs) {
+    if (!fs.existsSync(projectsConfigDir) || !fs.statSync(projectsConfigDir).isDirectory()) {
+      continue;
+    }
+    for (const fileName of fs.readdirSync(projectsConfigDir)) {
+      if (!fileName.endsWith(".json")) continue;
+      const jsonPath = path.join(projectsConfigDir, fileName);
+      try {
+        if (!fs.statSync(jsonPath).isFile()) continue;
+        const rawJson = fs.readFileSync(jsonPath, "utf8");
+        const projectObj = JSON.parse(rawJson);
+        const resources = projectObj?.projectResources?.resources;
+        if (!Array.isArray(resources)) continue;
+
+        let matchesMainRepo = false;
+        let modified = false;
+
+        for (const res of resources) {
+          const folderUri = res?.gitFolder?.folderUri || res?.folderUri;
+          const folderPath = uriToFsPath(folderUri);
+          if (!folderPath) continue;
+          if (
+            path.resolve(folderPath) === path.resolve(mainRepoRoot) ||
+            safeRealpath(folderPath) === mainRepoReal
+          ) {
+            matchesMainRepo = true;
+            const defaultBranch = res?.gitFolder?.defaultBranch;
+            if (
+              defaultBranch &&
+              !gitBranchExists(commonGitDir, defaultBranch) &&
+              mainBranch &&
+              gitBranchExists(commonGitDir, mainBranch)
+            ) {
+              res.gitFolder.defaultBranch = mainBranch;
+              modified = true;
+            }
+          }
+        }
+
+        if (!matchesMainRepo) continue;
+
+        const envList = projectObj?.environments?.environments;
+        if (Array.isArray(envList)) {
+          const keptEnvs = [];
+          for (const env of envList) {
+            const envResources = env?.resources?.resources;
+            const envPaths = Array.isArray(envResources)
+              ? envResources
+                  .map((r) => uriToFsPath(r?.folderUri || r?.gitFolder?.folderUri))
+                  .filter(Boolean)
+              : [];
+
+            const isActive =
+              envPaths.length > 0 &&
+              envPaths.some((p) => {
+                const resolvedP = path.resolve(p);
+                const realP = safeRealpath(p);
+                return (
+                  fs.existsSync(resolvedP) &&
+                  hasValidWorktreeGitLink(resolvedP) &&
+                  (activeWorktreePaths.has(resolvedP) || activeWorktreePaths.has(realP))
+                );
+              });
+
+            if (isActive) {
+              keptEnvs.push(env);
+            } else {
+              for (const p of envPaths) {
+                if (
+                  fs.existsSync(p) &&
+                  path.resolve(p) !== path.resolve(mainRepoRoot) &&
+                  !hasValidWorktreeGitLink(p)
+                ) {
+                  if (!dryRun) {
+                    fs.rmSync(p, { recursive: true, force: true });
+                  }
+                  recordGhostDir(p);
+                  removeEmptyParentContainer(p, mainRepoRoot, dryRun);
+                }
+              }
+              recordPruned(env?.name || (envPaths[0] ? path.basename(envPaths[0]) : "stale-env"));
+              modified = true;
+            }
+          }
+
+          if (keptEnvs.length !== envList.length) {
+            if (keptEnvs.length === 0) {
+              delete projectObj.environments;
+            } else {
+              projectObj.environments.environments = keptEnvs;
+            }
+            modified = true;
+          }
+        }
+
+        if (modified && !dryRun) {
+          fs.writeFileSync(jsonPath, JSON.stringify(projectObj, null, 2) + "\n", "utf8");
+        }
+      } catch {
+        // Ignore malformed or concurrent project JSON files
+      }
+    }
   }
 
   let refreshedServerInfo = false;

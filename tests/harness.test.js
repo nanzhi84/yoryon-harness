@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -473,6 +473,71 @@ function main() {
   assert.equal(fs.existsSync(infoRefsPath), true);
   assert.ok(fs.readFileSync(infoRefsPath, "utf8").includes("feat/wt-ghost"));
 
+  const projectsConfigDir = path.join(sandboxRoot, "work", "projects-config");
+  const customAgentWtContainer = path.join(
+    sandboxRoot,
+    "work",
+    "custom-agent-worktrees",
+    path.basename(sandboxRoot)
+  );
+  const strayAgentGhostDir = path.join(customAgentWtContainer, "orphan-agent-wt");
+  fs.mkdirSync(projectsConfigDir, { recursive: true });
+  fs.mkdirSync(strayAgentGhostDir, { recursive: true });
+
+  fs.mkdirSync(path.join(sandboxRoot, ".agents"), { recursive: true });
+  fs.writeFileSync(
+    path.join(sandboxRoot, ".agents", "harness.json"),
+    JSON.stringify(
+      {
+        worktreeAgents: [
+          {
+            agent: "custom-agent",
+            worktreeContainers: ["{repoRoot}/work/custom-agent-worktrees/{repo}"],
+            projectRegistryDirs: ["{repoRoot}/work/projects-config"],
+          },
+        ],
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const projectJsonPath = path.join(projectsConfigDir, "test-project.json");
+  fs.writeFileSync(
+    projectJsonPath,
+    JSON.stringify(
+      {
+        id: "test-project-id",
+        name: "blackbox-test-repo",
+        projectResources: {
+          resources: [
+            {
+              gitFolder: {
+                folderUri: pathToFileURL(sandboxRoot).href,
+                defaultBranch: "feat/wt-ghost",
+              },
+            },
+          ],
+        },
+        environments: {
+          environments: [
+            {
+              id: "env-ghost",
+              name: "wt-ghost",
+              resources: {
+                resources: [{ folderUri: pathToFileURL(wtGhostDir).href }],
+              },
+            },
+          ],
+        },
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
   // Simulate messy worktree teardown: remove .git pointer file inside wt-ghost, leaving ghost directory and stale .git/worktrees/wt-ghost metadata
   fs.rmSync(path.join(wtGhostDir, ".git"), { force: true });
   const wtMetaDir = path.join(sandboxRoot, ".git", "worktrees", "wt-ghost");
@@ -483,6 +548,18 @@ function main() {
   assert.equal(fs.existsSync(wtMetaDir), false, ".git/worktrees/wt-ghost should be pruned");
   assert.equal(fs.existsSync(wtGhostDir), false, "Orphaned ghost directory wt-ghost should be removed");
   assert.equal(fs.existsSync(externalContainer), false, "Now-empty parent container should be removed");
+  assert.equal(
+    fs.existsSync(strayAgentGhostDir),
+    false,
+    "Orphaned worktree inside declaratively configured agent worktreeContainers should be removed"
+  );
+
+  const afterGhostPruneProj = JSON.parse(fs.readFileSync(projectJsonPath, "utf8"));
+  assert.equal(
+    afterGhostPruneProj.environments,
+    undefined,
+    "Stale worktree environment should be removed from project config JSON"
+  );
 
   const delBranchRes = spawnSync("git", ["branch", "-D", "feat/wt-ghost"], {
     cwd: sandboxRoot,
@@ -501,6 +578,12 @@ function main() {
     fs.existsSync(path.join(sandboxRoot, ".git", "refs", "heads", "feat")),
     false,
     "Empty ref namespace directory .git/refs/heads/feat should be removed"
+  );
+  const afterBranchDelProj = JSON.parse(fs.readFileSync(projectJsonPath, "utf8"));
+  assert.notEqual(
+    afterBranchDelProj.projectResources.resources[0].gitFolder.defaultBranch,
+    "feat/wt-ghost",
+    "defaultBranch pointing to a deleted branch should be reconciled to active main repo branch"
   );
 
   console.log("✓ All black-box integration contract tests passed.");
