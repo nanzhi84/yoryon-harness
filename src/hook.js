@@ -5,8 +5,12 @@ import { spawnSync } from "node:child_process";
 import { checkWorkspace } from "./doctor.js";
 import { cleanSandboxes, resolveGitCommonDir } from "./clean.js";
 
+const HOOK_PATH_EXPORT =
+  'export PATH="$PWD/.venv/bin:$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"';
+
 const PRE_COMMIT_MARKER = "# yoryon-harness pre-commit hook";
 const PRE_COMMIT_SNIPPET = `${PRE_COMMIT_MARKER}
+${HOOK_PATH_EXPORT}
 if command -v harness >/dev/null 2>&1; then
   harness hook run
 elif [ -f "./bin/harness.js" ]; then
@@ -16,11 +20,12 @@ fi
 
 const REF_TX_MARKER = "# yoryon-harness reference-transaction hook";
 const REF_TX_SNIPPET = `${REF_TX_MARKER}
+${HOOK_PATH_EXPORT}
 if [ "$1" = "committed" ]; then
   if command -v harness >/dev/null 2>&1; then
-    harness clean --worktrees --quiet >/dev/null 2>&1 &
+    harness clean --worktrees --quiet >/dev/null 2>&1 || true
   elif [ -f "./bin/harness.js" ]; then
-    node ./bin/harness.js clean --worktrees --quiet >/dev/null 2>&1 &
+    node ./bin/harness.js clean --worktrees --quiet >/dev/null 2>&1 || true
   fi
 fi
 `;
@@ -50,6 +55,13 @@ export function installHooks(targetRoot = process.cwd(), options = {}) {
         fs.writeFileSync(preCommitPath, `${header}${PRE_COMMIT_SNIPPET}`, "utf8");
         fs.chmodSync(preCommitPath, 0o755);
         actions.push("installed .git/hooks/pre-commit");
+      } else if (!existing.includes(PRE_COMMIT_SNIPPET.trim())) {
+        const markerIdx = existing.indexOf(PRE_COMMIT_MARKER);
+        const prefix = existing.slice(0, markerIdx).trimEnd();
+        const header = prefix ? `${prefix}\n\n` : "#!/usr/bin/env sh\nset -e\n\n";
+        fs.writeFileSync(preCommitPath, `${header}${PRE_COMMIT_SNIPPET}`, "utf8");
+        fs.chmodSync(preCommitPath, 0o755);
+        actions.push("updated   .git/hooks/pre-commit");
       } else {
         actions.push("ok        .git/hooks/pre-commit (already installed)");
       }
@@ -65,6 +77,13 @@ export function installHooks(targetRoot = process.cwd(), options = {}) {
         fs.writeFileSync(refTxPath, `${header}${REF_TX_SNIPPET}`, "utf8");
         fs.chmodSync(refTxPath, 0o755);
         actions.push("installed .git/hooks/reference-transaction");
+      } else if (!existingRefTx.includes(REF_TX_SNIPPET.trim())) {
+        const markerIdx = existingRefTx.indexOf(REF_TX_MARKER);
+        const prefix = existingRefTx.slice(0, markerIdx).trimEnd();
+        const header = prefix ? `${prefix}\n\n` : "#!/usr/bin/env sh\n\n";
+        fs.writeFileSync(refTxPath, `${header}${REF_TX_SNIPPET}`, "utf8");
+        fs.chmodSync(refTxPath, 0o755);
+        actions.push("updated   .git/hooks/reference-transaction");
       } else {
         actions.push("ok        .git/hooks/reference-transaction (already installed)");
       }

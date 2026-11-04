@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { installHooks } from "./hook.js";
+import { resolveGitCommonDir } from "./clean.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEMPLATES_DIR = path.resolve(__dirname, "../templates");
@@ -151,5 +153,9 @@ export function runSync(targetRoot = process.cwd()) {
   console.log(`Universal Harness synced in ${targetRoot}:`);
   for (const line of actions) {
     console.log(`  ${line}`);
+  }
+
+  if (resolveGitCommonDir(targetRoot)) {
+    installHooks(targetRoot, { git: true, agents: false });
   }
 }

@@ -526,6 +526,9 @@ export function resolveAgentWorktreePaths(mainRepoRoot, options = {}) {
  * IDE project worktree registries, .git/info/refs, and empty ref namespaces.
  */
 export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
+  if (process.env.HARNESS_CLEAN_WORKTREES_ACTIVE === "1") {
+    return { prunedWorktrees: [], removedGhostDirs: [], refreshedServerInfo: false };
+  }
   const dryRun = Boolean(options.dryRun);
   const quiet = Boolean(options.quiet);
   const silent = Boolean(options.silent);
@@ -670,16 +673,6 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
             safeRealpath(folderPath) === mainRepoReal
           ) {
             matchesMainRepo = true;
-            const defaultBranch = res?.gitFolder?.defaultBranch;
-            if (
-              defaultBranch &&
-              !gitBranchExists(commonGitDir, defaultBranch) &&
-              mainBranch &&
-              gitBranchExists(commonGitDir, mainBranch)
-            ) {
-              res.gitFolder.defaultBranch = mainBranch;
-              modified = true;
-            }
           }
         }
 
@@ -724,7 +717,24 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
                   removeEmptyParentContainer(p, mainRepoRoot, dryRun);
                 }
               }
-              recordPruned(env?.name || (envPaths[0] ? path.basename(envPaths[0]) : "stale-env"));
+              const staleName =
+                env?.name || (envPaths[0] ? path.basename(envPaths[0]) : "stale-env");
+              recordPruned(staleName);
+              if (
+                !dryRun &&
+                staleName &&
+                staleName !== "main" &&
+                staleName !== "master" &&
+                staleName !== mainBranch &&
+                gitBranchExists(commonGitDir, staleName)
+              ) {
+                spawnSync("git", ["branch", "-d", staleName], {
+                  cwd: mainRepoRoot,
+                  encoding: "utf8",
+                  timeout: 5000,
+                  env: { ...process.env, HARNESS_CLEAN_WORKTREES_ACTIVE: "1" },
+                });
+              }
               modified = true;
             }
           }
@@ -739,8 +749,32 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
           }
         }
 
+        for (const res of resources) {
+          const folderUri = res?.gitFolder?.folderUri || res?.folderUri;
+          const folderPath = uriToFsPath(folderUri);
+          if (!folderPath) continue;
+          if (
+            path.resolve(folderPath) === path.resolve(mainRepoRoot) ||
+            safeRealpath(folderPath) === mainRepoReal
+          ) {
+            const defaultBranch = res?.gitFolder?.defaultBranch;
+            if (
+              defaultBranch &&
+              !gitBranchExists(commonGitDir, defaultBranch) &&
+              mainBranch &&
+              gitBranchExists(commonGitDir, mainBranch)
+            ) {
+              res.gitFolder.defaultBranch = mainBranch;
+              modified = true;
+            }
+          }
+        }
+
         if (modified && !dryRun) {
-          fs.writeFileSync(jsonPath, JSON.stringify(projectObj, null, 2) + "\n", "utf8");
+          const serialized = JSON.stringify(projectObj, null, 2) + "\n";
+          const tmpPath = `${jsonPath}.tmp.${process.pid}`;
+          fs.writeFileSync(tmpPath, serialized, "utf8");
+          fs.renameSync(tmpPath, jsonPath);
         }
       } catch {
         // Ignore malformed or concurrent project JSON files
