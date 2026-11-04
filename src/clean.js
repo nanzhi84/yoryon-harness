@@ -1,8 +1,22 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 
-const SANDBOX_DIRS = ["work", "artifacts"];
+const SANDBOX_DIRS = ["work", "artifacts", ".agents/teamwork"];
 const PROTECTED_NAMES = new Set([".gitkeep", ".gitignore"]);
+const PROTECTED_AGENTS_NAMES = new Set([
+  "hooks",
+  "hooks.json",
+  "rules",
+  "skills",
+  "workflows",
+  "plugins",
+  "mcp",
+  "agents",
+  "teamwork",
+  ".gitkeep",
+  ".gitignore",
+]);
 const DEFAULT_MAX_AGE = "12h";
 
 /**
@@ -140,6 +154,49 @@ export function cleanSandboxes(targetRoot = process.cwd(), options = {}) {
         kept.push(entry.relPath);
       }
     });
+
+    if (
+      dirName === ".agents/teamwork" &&
+      !dryRun &&
+      fs.existsSync(sandboxDir) &&
+      fs.readdirSync(sandboxDir).length === 0
+    ) {
+      fs.rmSync(sandboxDir, { recursive: true, force: true });
+    }
+  }
+
+  // Also GC stray/nested non-config entries inside `.agents/` (e.g. `.agents/.agents`, `.agents/scratch`)
+  const agentsDir = path.join(targetRoot, ".agents");
+  if (fs.existsSync(agentsDir) && fs.statSync(agentsDir).isDirectory()) {
+    const strayEntries = fs
+      .readdirSync(agentsDir)
+      .filter((name) => !PROTECTED_AGENTS_NAMES.has(name) && name !== ".DS_Store")
+      .map((name) => {
+        const fullPath = path.join(agentsDir, name);
+        const relPath = path.join(".agents", name);
+        const { mtimeMs, bytes } = statTree(fullPath);
+        return { name, fullPath, relPath, mtimeMs, bytes };
+      });
+
+    for (const entry of strayEntries) {
+      const ageMs = Math.max(0, now - entry.mtimeMs);
+      const isNestedAgents = entry.name === ".agents";
+      if (all || isNestedAgents || ageMs >= maxAgeMs) {
+        if (!dryRun) {
+          fs.rmSync(entry.fullPath, { recursive: true, force: true });
+        }
+        removed.push(entry.relPath);
+        bytesFreed += entry.bytes;
+      } else {
+        kept.push(entry.relPath);
+      }
+    }
+  }
+
+  try {
+    cleanWorktrees(targetRoot, { dryRun, quiet: true, silent: true });
+  } catch {
+    // Non-fatal: never block sandbox cleanup if git worktree pruning encounters an error
   }
 
   if (!silent && (removed.length > 0 || !quiet)) {
@@ -163,4 +220,164 @@ export function cleanSandboxes(targetRoot = process.cwd(), options = {}) {
   }
 
   return { removed, kept, bytesFreed };
+}
+
+/**
+ * Resolve the common .git directory for a repository root or linked worktree root.
+ */
+export function resolveGitCommonDir(targetRoot = process.cwd()) {
+  const dotGit = path.join(targetRoot, ".git");
+  if (!fs.existsSync(dotGit)) {
+    return null;
+  }
+  if (fs.statSync(dotGit).isDirectory()) {
+    return dotGit;
+  }
+  try {
+    const proc = spawnSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd: targetRoot,
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    if (proc.status === 0 && proc.stdout && proc.stdout.trim()) {
+      const resolved = path.resolve(targetRoot, proc.stdout.trim());
+      if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+        return resolved;
+      }
+    }
+  } catch {
+    // Fallback below
+  }
+  return null;
+}
+
+function pruneEmptySubdirs(rootDir) {
+  if (!fs.existsSync(rootDir) || !fs.statSync(rootDir).isDirectory()) {
+    return;
+  }
+  for (const name of fs.readdirSync(rootDir)) {
+    const fullPath = path.join(rootDir, name);
+    try {
+      const stat = fs.lstatSync(fullPath);
+      if (stat.isDirectory() && !stat.isSymbolicLink()) {
+        pruneEmptySubdirs(fullPath);
+        const remaining = fs.readdirSync(fullPath).filter((n) => n !== ".DS_Store");
+        if (remaining.length === 0) {
+          fs.rmSync(fullPath, { recursive: true, force: true });
+        }
+      }
+    } catch {
+      // Ignore concurrent deletion
+    }
+  }
+}
+
+/**
+ * Reconcile and prune stale Git worktree metadata (.git/worktrees/*),
+ * orphaned ghost worktree directories, .git/info/refs, and empty ref namespaces.
+ */
+export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
+  const dryRun = Boolean(options.dryRun);
+  const quiet = Boolean(options.quiet);
+  const silent = Boolean(options.silent);
+
+  const commonGitDir = resolveGitCommonDir(targetRoot);
+  if (!commonGitDir) {
+    return { prunedWorktrees: [], removedGhostDirs: [], refreshedServerInfo: false };
+  }
+
+  const mainRepoRoot = path.dirname(commonGitDir);
+  const worktreesMetaDir = path.join(commonGitDir, "worktrees");
+  const prunedWorktrees = [];
+  const removedGhostDirs = [];
+
+  if (fs.existsSync(worktreesMetaDir) && fs.statSync(worktreesMetaDir).isDirectory()) {
+    for (const wtName of fs.readdirSync(worktreesMetaDir)) {
+      const wtEntryDir = path.join(worktreesMetaDir, wtName);
+      try {
+        if (!fs.statSync(wtEntryDir).isDirectory()) continue;
+        if (fs.existsSync(path.join(wtEntryDir, "locked"))) continue;
+
+        const gitdirFile = path.join(wtEntryDir, "gitdir");
+        if (!fs.existsSync(gitdirFile)) continue;
+
+        const rawTarget = fs.readFileSync(gitdirFile, "utf8").trim();
+        if (!rawTarget) continue;
+
+        const wtGitFile = path.resolve(wtEntryDir, rawTarget);
+        const wtPhysicalDir = path.dirname(wtGitFile);
+
+        if (!fs.existsSync(wtGitFile)) {
+          prunedWorktrees.push(wtName);
+          if (
+            fs.existsSync(wtPhysicalDir) &&
+            path.resolve(wtPhysicalDir) !== path.resolve(mainRepoRoot)
+          ) {
+            if (!dryRun) {
+              fs.rmSync(wtPhysicalDir, { recursive: true, force: true });
+            }
+            removedGhostDirs.push(wtPhysicalDir);
+          }
+
+          const parentDir = path.dirname(wtPhysicalDir);
+          if (
+            parentDir &&
+            path.resolve(parentDir) !== path.resolve(mainRepoRoot) &&
+            path.resolve(parentDir) !== path.parse(parentDir).root &&
+            fs.existsSync(parentDir)
+          ) {
+            try {
+              const siblings = fs.readdirSync(parentDir).filter((n) => n !== ".DS_Store");
+              if (siblings.length === 0 && !dryRun) {
+                fs.rmSync(parentDir, { recursive: true, force: true });
+              }
+            } catch {
+              // Ignore parent cleanup errors
+            }
+          }
+        }
+      } catch {
+        // Ignore transient worktree metadata errors
+      }
+    }
+  }
+
+  if (!dryRun) {
+    spawnSync("git", ["worktree", "prune", "--expire", "now"], {
+      cwd: mainRepoRoot,
+      encoding: "utf8",
+      timeout: 5000,
+    });
+  }
+
+  let refreshedServerInfo = false;
+  const infoRefsPath = path.join(commonGitDir, "info", "refs");
+  if (fs.existsSync(infoRefsPath)) {
+    if (!dryRun) {
+      const res = spawnSync("git", ["update-server-info"], {
+        cwd: mainRepoRoot,
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      refreshedServerInfo = res.status === 0;
+    } else {
+      refreshedServerInfo = true;
+    }
+  }
+
+  if (!dryRun) {
+    pruneEmptySubdirs(path.join(commonGitDir, "refs", "heads"));
+    pruneEmptySubdirs(path.join(commonGitDir, "logs", "refs", "heads"));
+  }
+
+  if (!silent && (prunedWorktrees.length > 0 || removedGhostDirs.length > 0 || !quiet)) {
+    const prefix = dryRun ? "[harness clean --worktrees --dry-run]" : "[harness clean --worktrees]";
+    console.log(
+      `${prefix} pruned ${prunedWorktrees.length} stale worktree metadata item(s), removed ${removedGhostDirs.length} ghost directory(ies)${
+        refreshedServerInfo ? ", refreshed .git/info/refs" : ""
+      }.`
+    );
+  }
+
+  return { prunedWorktrees, removedGhostDirs, refreshedServerInfo };
 }

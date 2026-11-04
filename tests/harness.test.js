@@ -98,14 +98,22 @@ function main() {
 
   const expiredWork = path.join(sandboxRoot, "work", "expired-run");
   const freshWork = path.join(sandboxRoot, "work", "fresh-run");
+  const expiredTeamwork = path.join(sandboxRoot, ".agents", "teamwork", "expired-subagent");
+  const nestedAgents = path.join(sandboxRoot, ".agents", ".agents", "hooks");
   fs.mkdirSync(expiredWork, { recursive: true });
   fs.mkdirSync(freshWork, { recursive: true });
+  fs.mkdirSync(expiredTeamwork, { recursive: true });
+  fs.mkdirSync(nestedAgents, { recursive: true });
   const twoDaysAgo = new Date(Date.now() - 48 * 3600 * 1000);
   fs.utimesSync(expiredWork, twoDaysAgo, twoDaysAgo);
+  fs.utimesSync(expiredTeamwork, twoDaysAgo, twoDaysAgo);
 
   const hookAgentRes = runCli(sandboxRoot, ["hook", "run", "--agent"]);
   assert.equal(hookAgentRes.status, 2);
   assert.equal(fs.existsSync(expiredWork), false, "Expired work dir should be auto-cleaned by hook");
+  assert.equal(fs.existsSync(expiredTeamwork), false, "Expired .agents/teamwork dir should be auto-cleaned by hook");
+  assert.equal(fs.existsSync(path.join(sandboxRoot, ".agents", ".agents")), false, "Nested .agents/.agents should be auto-cleaned by hook");
+  assert.equal(fs.existsSync(path.join(sandboxRoot, ".agents", "hooks.json")), true, ".agents/hooks.json must be preserved");
   assert.equal(fs.existsSync(freshWork), true, "Fresh work dir should be preserved by hook");
 
   assert.equal(runCli(sandboxRoot, ["clean", "--all"]).status, 0);
@@ -417,6 +425,83 @@ function main() {
   assert.equal(linterCleanRes.status, 0);
   const linterCleanJson = JSON.parse(linterCleanRes.stdout.trim());
   assert.equal(linterCleanJson.decision, "stop");
+
+  // 9. Git Worktree Metadata & Ghost Directory GC (harness hook install --git & harness clean --worktrees)
+  assert.equal(
+    spawnSync("git", ["init"], { cwd: sandboxRoot, encoding: "utf8" }).status,
+    0
+  );
+  assert.equal(
+    spawnSync("git", ["config", "user.name", "Harness Test"], { cwd: sandboxRoot, encoding: "utf8" }).status,
+    0
+  );
+  assert.equal(
+    spawnSync("git", ["config", "user.email", "test@example.com"], { cwd: sandboxRoot, encoding: "utf8" }).status,
+    0
+  );
+  assert.equal(
+    spawnSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: sandboxRoot, encoding: "utf8" }).status,
+    0
+  );
+
+  const externalContainer = path.join(sandboxRoot, "work", "wt-container");
+  const wtGhostDir = path.join(externalContainer, "wt-ghost");
+  const wtAddRes = spawnSync("git", ["worktree", "add", "-b", "feat/wt-ghost", wtGhostDir], {
+    cwd: sandboxRoot,
+    encoding: "utf8",
+  });
+  assert.equal(wtAddRes.status, 0, wtAddRes.stderr);
+
+  const hookGitFromWtRes = runCli(wtGhostDir, ["hook", "install", "--git"]);
+  assert.equal(hookGitFromWtRes.status, 0, hookGitFromWtRes.stderr);
+  const refTxHookPath = path.join(sandboxRoot, ".git", "hooks", "reference-transaction");
+  assert.equal(fs.existsSync(refTxHookPath), true, "reference-transaction hook should exist in common .git/hooks");
+  assert.ok(
+    (fs.statSync(refTxHookPath).mode & 0o111) !== 0,
+    "reference-transaction hook must be executable"
+  );
+
+  const hookGitFromRootRes = runCli(sandboxRoot, ["hook", "install", "--git"]);
+  assert.equal(hookGitFromRootRes.status, 0, hookGitFromRootRes.stderr);
+  assert.equal(fs.existsSync(refTxHookPath), true);
+
+  assert.equal(
+    spawnSync("git", ["update-server-info"], { cwd: sandboxRoot, encoding: "utf8" }).status,
+    0
+  );
+  const infoRefsPath = path.join(sandboxRoot, ".git", "info", "refs");
+  assert.equal(fs.existsSync(infoRefsPath), true);
+  assert.ok(fs.readFileSync(infoRefsPath, "utf8").includes("feat/wt-ghost"));
+
+  // Simulate messy worktree teardown: remove .git pointer file inside wt-ghost, leaving ghost directory and stale .git/worktrees/wt-ghost metadata
+  fs.rmSync(path.join(wtGhostDir, ".git"), { force: true });
+  const wtMetaDir = path.join(sandboxRoot, ".git", "worktrees", "wt-ghost");
+  assert.equal(fs.existsSync(wtMetaDir), true, ".git/worktrees/wt-ghost should still exist before clean --worktrees");
+
+  const cleanWtRes = runCli(sandboxRoot, ["clean", "--worktrees"]);
+  assert.equal(cleanWtRes.status, 0, cleanWtRes.stderr);
+  assert.equal(fs.existsSync(wtMetaDir), false, ".git/worktrees/wt-ghost should be pruned");
+  assert.equal(fs.existsSync(wtGhostDir), false, "Orphaned ghost directory wt-ghost should be removed");
+  assert.equal(fs.existsSync(externalContainer), false, "Now-empty parent container should be removed");
+
+  const delBranchRes = spawnSync("git", ["branch", "-D", "feat/wt-ghost"], {
+    cwd: sandboxRoot,
+    encoding: "utf8",
+  });
+  assert.equal(delBranchRes.status, 0, delBranchRes.stderr);
+
+  const cleanAfterBranchDelRes = runCli(sandboxRoot, ["clean", "--worktrees"]);
+  assert.equal(cleanAfterBranchDelRes.status, 0, cleanAfterBranchDelRes.stderr);
+  assert.equal(
+    fs.readFileSync(infoRefsPath, "utf8").includes("feat/wt-ghost"),
+    false,
+    ".git/info/refs should no longer contain deleted branch feat/wt-ghost"
+  );
+  assert.equal(
+    fs.existsSync(path.join(sandboxRoot, ".git", "refs", "heads", "feat")),
+    false,
+    "Empty ref namespace directory .git/refs/heads/feat should be removed"
+  );
 
   console.log("✓ All black-box integration contract tests passed.");
   } finally {

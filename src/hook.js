@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { checkWorkspace } from "./doctor.js";
-import { cleanSandboxes } from "./clean.js";
+import { cleanSandboxes, resolveGitCommonDir } from "./clean.js";
 
 const PRE_COMMIT_MARKER = "# yoryon-harness pre-commit hook";
 const PRE_COMMIT_SNIPPET = `${PRE_COMMIT_MARKER}
@@ -14,8 +14,19 @@ elif [ -f "./bin/harness.js" ]; then
 fi
 `;
 
+const REF_TX_MARKER = "# yoryon-harness reference-transaction hook";
+const REF_TX_SNIPPET = `${REF_TX_MARKER}
+if [ "$1" = "committed" ]; then
+  if command -v harness >/dev/null 2>&1; then
+    harness clean --worktrees --quiet >/dev/null 2>&1 &
+  elif [ -f "./bin/harness.js" ]; then
+    node ./bin/harness.js clean --worktrees --quiet >/dev/null 2>&1 &
+  fi
+fi
+`;
+
 /**
- * Install Git pre-commit hook and/or .agents/hooks.json Stop hook.
+ * Install Git pre-commit & reference-transaction hooks and/or .agents/hooks.json Stop hook.
  */
 export function installHooks(targetRoot = process.cwd(), options = {}) {
   const installGit = options.git || (!options.git && !options.agents);
@@ -23,8 +34,8 @@ export function installHooks(targetRoot = process.cwd(), options = {}) {
   const actions = [];
 
   if (installGit) {
-    const gitDir = path.join(targetRoot, ".git");
-    if (fs.existsSync(gitDir) && fs.statSync(gitDir).isDirectory()) {
+    const gitDir = resolveGitCommonDir(targetRoot);
+    if (gitDir) {
       const hooksDir = path.join(gitDir, "hooks");
       fs.mkdirSync(hooksDir, { recursive: true });
       const preCommitPath = path.join(hooksDir, "pre-commit");
@@ -41,6 +52,21 @@ export function installHooks(targetRoot = process.cwd(), options = {}) {
         actions.push("installed .git/hooks/pre-commit");
       } else {
         actions.push("ok        .git/hooks/pre-commit (already installed)");
+      }
+
+      const refTxPath = path.join(hooksDir, "reference-transaction");
+      let existingRefTx = "";
+      if (fs.existsSync(refTxPath)) {
+        existingRefTx = fs.readFileSync(refTxPath, "utf8");
+      }
+
+      if (!existingRefTx.includes(REF_TX_MARKER)) {
+        const header = existingRefTx ? `${existingRefTx.trimEnd()}\n\n` : "#!/usr/bin/env sh\n\n";
+        fs.writeFileSync(refTxPath, `${header}${REF_TX_SNIPPET}`, "utf8");
+        fs.chmodSync(refTxPath, 0o755);
+        actions.push("installed .git/hooks/reference-transaction");
+      } else {
+        actions.push("ok        .git/hooks/reference-transaction (already installed)");
       }
     } else if (options.git) {
       console.error("No .git directory found in current workspace. Run `git init` first.");
