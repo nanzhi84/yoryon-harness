@@ -393,12 +393,70 @@ function gitBranchExists(commonGitDir, branchName) {
   return false;
 }
 
+function isStrictDescendantPath(childPath, parentPath) {
+  const rel = path.relative(parentPath, childPath);
+  return Boolean(rel && rel !== "." && !rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function isInsideWorktreeContainers(targetPath, worktreeContainerDirs, mainRepoRoot) {
+  if (!targetPath || !Array.isArray(worktreeContainerDirs) || worktreeContainerDirs.length === 0) {
+    return false;
+  }
+  const resolvedTarget = path.resolve(targetPath);
+  const realTarget = safeRealpath(targetPath);
+  const resolvedRepo = path.resolve(mainRepoRoot);
+  const realRepo = safeRealpath(mainRepoRoot);
+  const resolvedHome = path.resolve(os.homedir());
+  const realHome = safeRealpath(os.homedir());
+
+  if (
+    resolvedTarget === path.parse(resolvedTarget).root ||
+    resolvedTarget === resolvedRepo ||
+    realTarget === realRepo ||
+    resolvedTarget === resolvedHome ||
+    realTarget === realHome ||
+    isStrictDescendantPath(resolvedRepo, resolvedTarget) ||
+    isStrictDescendantPath(realRepo, realTarget)
+  ) {
+    return false;
+  }
+
+  for (const containerDir of worktreeContainerDirs) {
+    if (!containerDir) continue;
+    const resolvedContainer = path.resolve(containerDir);
+    const realContainer = safeRealpath(containerDir);
+    if (
+      resolvedContainer === path.parse(resolvedContainer).root ||
+      resolvedContainer === resolvedRepo ||
+      realContainer === realRepo ||
+      resolvedContainer === resolvedHome ||
+      realContainer === realHome ||
+      isStrictDescendantPath(resolvedRepo, resolvedContainer) ||
+      isStrictDescendantPath(realRepo, realContainer)
+    ) {
+      continue;
+    }
+    if (
+      isStrictDescendantPath(resolvedTarget, resolvedContainer) ||
+      isStrictDescendantPath(realTarget, realContainer)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function removeEmptyParentContainer(wtPhysicalDir, mainRepoRoot, dryRun) {
   const parentDir = path.dirname(wtPhysicalDir);
+  const resolvedParent = parentDir ? path.resolve(parentDir) : "";
+  const resolvedRepo = path.resolve(mainRepoRoot);
+  const resolvedHome = path.resolve(os.homedir());
   if (
     parentDir &&
-    path.resolve(parentDir) !== path.resolve(mainRepoRoot) &&
-    path.resolve(parentDir) !== path.parse(parentDir).root &&
+    resolvedParent !== resolvedRepo &&
+    resolvedParent !== resolvedHome &&
+    resolvedParent !== path.parse(resolvedParent).root &&
+    !isStrictDescendantPath(resolvedRepo, resolvedParent) &&
     fs.existsSync(parentDir)
   ) {
     try {
@@ -580,16 +638,28 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
         }
 
         recordPruned(wtName);
+        const resolvedWtDir = path.resolve(wtPhysicalDir);
+        const resolvedRepo = path.resolve(mainRepoRoot);
+        const resolvedHome = path.resolve(os.homedir());
+        const isSafeWtTarget =
+          path.basename(wtGitFile) === ".git" &&
+          resolvedWtDir !== resolvedRepo &&
+          resolvedWtDir !== resolvedHome &&
+          resolvedWtDir !== path.parse(resolvedWtDir).root &&
+          !isStrictDescendantPath(resolvedRepo, resolvedWtDir);
         if (
+          isSafeWtTarget &&
           fs.existsSync(wtPhysicalDir) &&
-          path.resolve(wtPhysicalDir) !== path.resolve(mainRepoRoot)
+          !hasValidWorktreeGitLink(wtPhysicalDir)
         ) {
           if (!dryRun) {
             fs.rmSync(wtPhysicalDir, { recursive: true, force: true });
           }
           recordGhostDir(wtPhysicalDir);
         }
-        removeEmptyParentContainer(wtPhysicalDir, mainRepoRoot, dryRun);
+        if (isSafeWtTarget) {
+          removeEmptyParentContainer(wtPhysicalDir, mainRepoRoot, dryRun);
+        }
       } catch {
         // Ignore transient worktree metadata errors
       }
@@ -708,6 +778,7 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
                 if (
                   fs.existsSync(p) &&
                   path.resolve(p) !== path.resolve(mainRepoRoot) &&
+                  isInsideWorktreeContainers(p, worktreeContainerDirs, mainRepoRoot) &&
                   !hasValidWorktreeGitLink(p)
                 ) {
                   if (!dryRun) {

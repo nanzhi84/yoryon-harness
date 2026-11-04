@@ -66,3 +66,5 @@ sequenceDiagram
    - 自动探测目标仓库的多语言静态类型检查器与 Linter（Python `pyright` / `pyrefly` / `ruff`、JS/TS `eslint` / `tsc`），将静态类型与 Linter Error/Warning 与 `checkWorkspace` 诊断合并输出为 `{"decision": "continue", "reason": "..."}`。
 4. **沙盒回执落盘（[`src/run.js`](../../src/run.js)）**：
    - 每次执行 `harness run <task> -- <cmd>` 均生成独立的 `<YYYYMMDD-HHmmss>-<task>` 运行 ID，并在 `artifacts/<run-id>/receipt.json` 中完整记录命令参数、起止时间、耗时、退出码及产物列表。
+5. **Worktree 物理目录回收边界守卫（[`src/clean.js`](../../src/clean.js)）**：
+   - 回收项目注册表（`projectRegistryDirs`）中的失效 `environments` 时，仅当路径严格位于已声明的 `worktreeContainerDirs` 容器子目录内（`isInsideWorktreeContainers`）且无有效 `.git` 链接时才允许删除物理空壳目录；位于受管容器之外的任何现存目录仅从注册表 JSON 中移除失效条目，绝不执行物理删除。

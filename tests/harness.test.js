@@ -481,8 +481,12 @@ function main() {
     path.basename(sandboxRoot)
   );
   const strayAgentGhostDir = path.join(customAgentWtContainer, "orphan-agent-wt");
+  const unrelatedExternalDir = path.join(sandboxRoot, "work", "unrelated-user-dir");
+  const importantFilePath = path.join(unrelatedExternalDir, "important.txt");
   fs.mkdirSync(projectsConfigDir, { recursive: true });
   fs.mkdirSync(strayAgentGhostDir, { recursive: true });
+  fs.mkdirSync(unrelatedExternalDir, { recursive: true });
+  fs.writeFileSync(importantFilePath, "critical user data\n", "utf8");
 
   fs.mkdirSync(path.join(sandboxRoot, ".agents"), { recursive: true });
   fs.writeFileSync(
@@ -529,6 +533,13 @@ function main() {
                 resources: [{ folderUri: pathToFileURL(wtGhostDir).href }],
               },
             },
+            {
+              id: "env-unrelated-external",
+              name: "unrelated-user-dir",
+              resources: {
+                resources: [{ folderUri: pathToFileURL(unrelatedExternalDir).href }],
+              },
+            },
           ],
         },
       },
@@ -552,6 +563,16 @@ function main() {
     fs.existsSync(strayAgentGhostDir),
     false,
     "Orphaned worktree inside declaratively configured agent worktreeContainers should be removed"
+  );
+  assert.equal(
+    fs.existsSync(unrelatedExternalDir),
+    true,
+    "Directory referenced by stale environment outside worktreeContainerDirs must NOT be deleted"
+  );
+  assert.equal(
+    fs.existsSync(importantFilePath),
+    true,
+    "Files inside directory outside worktreeContainerDirs must be preserved"
   );
 
   const afterGhostPruneProj = JSON.parse(fs.readFileSync(projectJsonPath, "utf8"));
