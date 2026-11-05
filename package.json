@@ -9,7 +9,7 @@
   },
   "scripts": {
     "doctor": "node ./bin/harness.js doctor",
-    "test": "node ./tests/harness.test.js && node --test tests/hook_preservation.test.js tests/tdd_restoration.test.js"
+    "test": "node ./tests/harness.test.js && node --test tests/hook_preservation.test.js"
   },
   "files": [
     "bin/",

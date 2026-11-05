@@ -1363,68 +1363,7 @@ describe("TestUniversalHarness", () => {
   fs.rmSync(path.join(sandboxRoot, ".prettierrc"), { force: true });
   fs.rmSync(path.join(sandboxRoot, "src"), { recursive: true, force: true });
 
-  // 17. PROP-03 (harness tdd verify) & PROP-04 (harness sync auto-installs .agents/hooks.json)
-  fs.mkdirSync(path.join(sandboxRoot, "src"), { recursive: true });
-  const calcPath = path.join(sandboxRoot, "src", "calc.js");
-  fs.writeFileSync(calcPath, "export function multiply(a, b) { return 0; }\n", "utf8");
-  assert.equal(
-    spawnSync("git", ["add", "-A"], { cwd: sandboxRoot, encoding: "utf8", timeout: 5000 }).status,
-    0
-  );
-  assert.equal(
-    spawnSync("git", ["commit", "-m", "feat: stub multiply"], {
-      cwd: sandboxRoot,
-      encoding: "utf8",
-      timeout: 5000,
-    }).status,
-    0
-  );
-
-  // Modify implementation, add a new subpackage directory, and write real test checking both
-  fs.writeFileSync(calcPath, "export function multiply(a, b) { return a * b; }\n", "utf8");
-  const newPkgFile = path.join(sandboxRoot, "src", "newpkg", "helper.js");
-  fs.mkdirSync(path.dirname(newPkgFile), { recursive: true });
-  fs.writeFileSync(newPkgFile, "export const READY = true;\n", "utf8");
-
-  const calcTestPath = path.join(testsDir, "calc.test.mjs");
-  fs.writeFileSync(
-    calcTestPath,
-    'import fs from "node:fs";\nimport assert from "node:assert/strict";\nimport { multiply } from "../src/calc.js";\nassert.equal(fs.existsSync("./src/newpkg"), true, "newpkg dir must not exist during Red phase");\nassert.equal(multiply(6, 7), 42);\n',
-    "utf8"
-  );
-
-  const tddPassRes = runCli(sandboxRoot, [
-    "tdd",
-    "verify",
-    "--test",
-    "node ./tests/calc.test.mjs",
-  ]);
-  assert.equal(tddPassRes.status, 0, tddPassRes.stderr);
-  assert.ok(tddPassRes.stdout.includes("Red-Green TDD contract verified"));
-  assert.equal(
-    fs.existsSync(newPkgFile),
-    true,
-    "Newly created implementation file and parent directory must be restored after tdd verify"
-  );
-
-  // Tautological test that passes even on old baseline MUST fail Red Check in harness tdd verify
-  fs.writeFileSync(calcTestPath, 'import assert from "node:assert/strict";\nassert.equal(1, 1);\n', "utf8");
-  const tddFailRedRes = runCli(sandboxRoot, [
-    "tdd",
-    "verify",
-    "--test",
-    "node ./tests/calc.test.mjs",
-  ]);
-  assert.equal(tddFailRedRes.status, 1, "Tautological test must fail harness tdd verify Red Check");
-  assert.ok(tddFailRedRes.stderr.includes("Red Check failed"));
-
-  // Verify implementation file was faithfully restored after Red Check failure
-  assert.ok(
-    fs.readFileSync(calcPath, "utf8").includes("return a * b;"),
-    "Implementation file must be restored after tdd verify"
-  );
-
-  // PROP-04: Verify harness sync automatically ensures .agents/hooks.json exists
+  // 17. PROP-04: Verify harness sync automatically ensures .agents/hooks.json exists
   fs.rmSync(path.join(sandboxRoot, ".agents", "hooks.json"), { force: true });
   assert.equal(runCli(sandboxRoot, ["sync"]).status, 0);
   assert.equal(

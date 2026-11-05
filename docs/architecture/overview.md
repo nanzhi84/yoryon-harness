@@ -11,7 +11,6 @@ flowchart TD
     CLI --> Hook["src/hook.js (Agent 与 Git 自动钩子)"]
     CLI --> Clean["src/clean.js (沙盒 TTL、Worktree GC 与共享路径软链)"]
     CLI --> Run["src/run.js (隔离沙盒执行)"]
-    CLI --> Tdd["src/tdd.js (红绿 TDD 契约校验)"]
     CLI --> Scaffold["src/scaffold.js (Spec & ADR 流转)"]
 
     Config[".agents/harness.json (声明式机器配置)"] --> Doctor
@@ -27,8 +26,6 @@ flowchart TD
     Run --> Clean
     Doctor --> Rules["自研巡检规则 (HAR/DIR/GIT/ARC/SPC/ADR/REF/LNK/VOX/SUP/TST/MTX/AST)"]
     Run --> Sandbox["work/<run-id>/ & artifacts/<run-id>/"]
-    Tdd --> FileState["src/tdd-files.js (文件与符号链接快照)"]
-    Tdd --> Sandbox
     Clean --> Sandbox
 ```
 
@@ -37,11 +34,9 @@ flowchart TD
 - [src/doctor.js](../../src/doctor.js)：负责 `harness doctor` 与 `harness rule`，结合 `git ls-files -co --exclude-standard` 动态感知忽略规则，执行目录契约与防污染白名单（`HAR001`/`DIR001`）、生命周期位置（`SPC001`/`ADR001`/`ADR002`）、三列索引（`REF001`）、多语言测试命名与反 Mock/超时/只读基线锁契约（`TST001`~`TST004`）、矩阵不可变列保护（`MTX001`）、声明式架构边界守卫（`AST001`/`AST002`）及 Markdown 本地死链/锚点检查（`LNK001`/`LNK002`）。
 - [src/hook-script.js](../../src/hook-script.js)：按起止标记替换受管片段，旧版持久化 hook 仅按已发布格式迁移；未知旧片段拒绝覆盖，原文件保持不变。用户前后脚本逐字节保留。
 - [src/hook-tools.js](../../src/hook-tools.js) 与 [src/hook-checks.js](../../src/hook-checks.js)：分别封装工具探测、环境与变更文件发现，以及现有静态检查流程。
-- [src/tdd-files.js](../../src/tdd-files.js)：以 `lstat` 区分缺失、普通文件和符号链接，保存链接原始目标并按 Git 文件模式构造 HEAD 基线；替换前先解除目录项，避免写穿链接。
 - [src/hook.js](../../src/hook.js)：负责 `harness hook install` 与 `harness hook run [--agent] [--staged]`，自动归一化多语言工具链 `PATH`（`.venv/bin`、`node_modules/.bin`、`~/.cargo/bin`、`~/.local/bin`），通过 Git `pre-commit`、`reference-transaction` 与 Agent `Stop` 钩子自动清理过期沙盒产物与悬空 Git worktree 元数据、自动从 `HEAD` 还原被篡改的 `MTX001` 不可变单元格、运行文档与测试契约巡检及增量代码格式/静态类型/Linter 检查（Pyright/Pyrefly/Ruff/ESLint/Prettier/TSC），拦截违规并驱动模型自修复。
 - [src/clean.js](../../src/clean.js)：负责 `harness clean`（含 `--worktrees`）及生命周期钩子触发的 `work/`、`artifacts/` 中间产物 TTL / 数量配额清理，基于 `.agents/harness.json` `worktreeSharedPaths` 在子 worktree 中自动软链主仓共享路径，以及基于 `<common_git_dir>/worktrees/*/gitdir`、`.git/index.lock` 锁探活与 mtime 冷却窗口的孤儿 worktree 空壳目录、`.git/worktrees/` 悬空元数据、项目环境注册表失效 `environments` 条目回收。
 - [src/run.js](../../src/run.js)：负责 `harness run`，接管验收命令的隔离沙盒目录创建、子 worktree 共享路径自动软链、工具链环境变量注入与回执落盘。
-- [src/tdd.js](../../src/tdd.js)：负责 `harness tdd verify --test "<cmd>"`，自动在 `HEAD` 旧代码基线上执行红灯校验（断言必败）并在当前实现上执行绿灯校验（断言必过），落盘 `artifacts/<run-id>/tdd_receipt.json`。
 - [src/scaffold.js](../../src/scaffold.js)：负责 `harness spec new`、`harness adr new` 与 `harness adr supersede` 的确定性文档流转。
 
 ## 2. 核心执行链路与数据流
@@ -57,8 +52,6 @@ sequenceDiagram
     CLI->>FS: 创建目录骨架、同步 AGENTS.md & docs/README.md、配置 .agents/hooks.json
     Agent->>CLI: harness spec new / adr new / adr supersede
     CLI->>FS: 生成 issue#<N>/spec.md 或流转 ADR 至 superseded/
-    Agent->>CLI: harness tdd verify --test "<cmd>"
-    CLI->>Sandbox: 阶段1回退实现验红灯(exit!=0) -> 阶段2恢复实现验绿灯(exit==0) -> 落盘 tdd_receipt.json
     Agent->>CLI: harness run <task> -- <cmd>
     CLI->>Sandbox: 软链 worktreeSharedPaths，创建 <run-id> 隔离目录，执行命令并落盘 receipt.json
     Agent->>CLI: harness doctor / hook run
@@ -77,7 +70,7 @@ sequenceDiagram
    - `MTX001`、`AST001` / `AST002`：按 `.agents/harness.json` 锁定 CSV/TSV `immutableColumns` 不可篡改，以及声明式分层依赖方向与核心目录禁用字面量正则。
 3. **Agent Stop 钩子、矩阵自动还原与增量类型/格式门禁（[`src/hook.js`](../../src/hook.js)）**：
    - `harness hook run --agent` 仅在正常回合结束（`terminationReason == "NO_TOOL_CALL"`）时执行拦截；遇到 `MTX001` 违规时自动从 `HEAD` 还原不可变列单元格并注入告警；支持 `--staged` 增量检查 Python `ruff format --check` 与 JS/TS `prettier --check`。
-4. **红绿 TDD 因果验证与沙盒回执落盘（[`src/tdd.js`](../../src/tdd.js)、[`src/run.js`](../../src/run.js)）**：
-   - `harness tdd verify` 在 `try ... finally` 保护下暂存非测试实现改动并在 `HEAD` 基线上验证新测试必败、恢复实现后验证必过，杜绝事后同义反复测试。
+4. **隔离沙盒运行与回执落盘（[`src/run.js`](../../src/run.js)）**：
+   - `harness run` 在 `work/<run-id>/` 与 `artifacts/<run-id>/` 隔离目录中执行验收命令并生成 `receipt.json` 审计回执。
 5. **Worktree 物理目录回收边界与并发活跃度守卫（[`src/clean.js`](../../src/clean.js)）**：
    - 回收失效 worktree 前强制检查 `.git/index.lock` 等锁文件与 mtime 冷却窗口，且仅允许删除严格位于 `worktreeContainerDirs` 容器内部且无有效 `.git` 链接的物理目录。

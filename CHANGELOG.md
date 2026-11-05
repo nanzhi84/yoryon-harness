@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 
+### Removed
+- 移除 `harness tdd verify` 命令及相关实现（`src/tdd.js`、`src/tdd-files.js`、`tests/tdd_restoration.test.js`）：进程级 `exitCode !== 0` 红灯校验在 Agent 批量编写多条测试用例时存在单条用例失败或 `ImportError` 即整体放行的搭便车漏洞，统一收敛为静态测试契约巡检（`TST001`~`TST004`）、独立子代理（Fresh Subagent）黑盒盲写测试与 `harness run` 隔离沙盒真实验收。
+
 ### Changed
 - 默认根目录白名单收紧为 10 个通用工作区目录；框架、编辑器和业务目录由各项目 `.agents/harness.json` 的 `rootAllowlist` 显式声明。根目录权限不再复用递归内容扫描的依赖/构建排除名单，保留 Git 忽略及已声明共享路径语义。
 
