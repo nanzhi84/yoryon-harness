@@ -485,6 +485,94 @@ describe("TestUniversalHarness", () => {
   assert.ok(preCommitHookContent.includes("$HOME/.cargo/bin"));
   assert.ok(preCommitHookContent.includes("--staged"));
 
+  // Issue #1: Respect custom core.hooksPath and .git regular file (gitdir:) via `git rev-parse --git-path hooks`
+  const customHooksDir = path.join(sandboxRoot, ".githooks");
+  assert.equal(
+    spawnSync("git", ["config", "core.hooksPath", ".githooks"], {
+      cwd: sandboxRoot,
+      encoding: "utf8",
+      timeout: 5000,
+    }).status,
+    0
+  );
+  const hookCustomGitRes = runCli(sandboxRoot, ["hook", "install", "--git"]);
+  assert.equal(hookCustomGitRes.status, 0, hookCustomGitRes.stderr);
+  const customPreCommitPath = path.join(customHooksDir, "pre-commit");
+  const customRefTxPath = path.join(customHooksDir, "reference-transaction");
+  assert.equal(
+    fs.existsSync(customPreCommitPath),
+    true,
+    "harness hook install --git must install pre-commit into configured core.hooksPath (.githooks)"
+  );
+  assert.ok(
+    (fs.statSync(customPreCommitPath).mode & 0o111) !== 0,
+    "pre-commit hook in core.hooksPath must be executable"
+  );
+  assert.equal(
+    fs.existsSync(customRefTxPath),
+    true,
+    "harness hook install --git must install reference-transaction into configured core.hooksPath (.githooks)"
+  );
+  assert.ok(
+    (fs.statSync(customRefTxPath).mode & 0o111) !== 0,
+    "reference-transaction hook in core.hooksPath must be executable"
+  );
+
+  // Also verify default `harness hook install` (without --git) respects core.hooksPath
+  fs.rmSync(customHooksDir, { recursive: true, force: true });
+  const hookCustomDefaultRes = runCli(sandboxRoot, ["hook", "install"]);
+  assert.equal(hookCustomDefaultRes.status, 0, hookCustomDefaultRes.stderr);
+  assert.equal(
+    fs.existsSync(customPreCommitPath),
+    true,
+    "harness hook install must install pre-commit into configured core.hooksPath (.githooks)"
+  );
+  assert.equal(
+    fs.existsSync(customRefTxPath),
+    true,
+    "harness hook install must install reference-transaction into configured core.hooksPath (.githooks)"
+  );
+
+  // Clean up core.hooksPath and .githooks, then verify `harness hook install` (without --git) inside linked worktree (.git regular file)
+  assert.equal(
+    spawnSync("git", ["config", "--unset", "core.hooksPath"], {
+      cwd: sandboxRoot,
+      encoding: "utf8",
+      timeout: 5000,
+    }).status,
+    0
+  );
+  fs.rmSync(customHooksDir, { recursive: true, force: true });
+  const commonPreCommitPath = path.join(sandboxRoot, ".git", "hooks", "pre-commit");
+  fs.rmSync(commonPreCommitPath, { force: true });
+  fs.rmSync(refTxHookPath, { force: true });
+  assert.equal(
+    fs.statSync(path.join(wtGhostDir, ".git")).isFile(),
+    true,
+    "Linked worktree .git must be a regular file (gitdir pointer)"
+  );
+  const hookDefaultFromWtRes = runCli(wtGhostDir, ["hook", "install"]);
+  assert.equal(hookDefaultFromWtRes.status, 0, hookDefaultFromWtRes.stderr);
+  assert.equal(
+    fs.existsSync(commonPreCommitPath),
+    true,
+    "harness hook install inside linked worktree (.git file) must install pre-commit into resolved hooks dir"
+  );
+  assert.ok(
+    (fs.statSync(commonPreCommitPath).mode & 0o111) !== 0,
+    "pre-commit hook installed from linked worktree must be executable"
+  );
+  assert.equal(
+    fs.existsSync(refTxHookPath),
+    true,
+    "harness hook install inside linked worktree (.git file) must install reference-transaction into resolved hooks dir"
+  );
+  assert.ok(
+    (fs.statSync(refTxHookPath).mode & 0o111) !== 0,
+    "reference-transaction hook installed from linked worktree must be executable"
+  );
+  fs.rmSync(path.join(wtGhostDir, ".agents"), { recursive: true, force: true });
+
   assert.equal(
     spawnSync("git", ["update-server-info"], { cwd: sandboxRoot, encoding: "utf8", timeout: 5000 }).status,
     0

@@ -80,6 +80,35 @@ export function buildNormalizedEnv(targetRoot = process.cwd(), baseEnv = process
 }
 
 /**
+ * Resolve the Git hooks directory for a repository root, linked worktree, or submodule
+ * via `git rev-parse --git-path hooks` (which also honors `core.hooksPath`).
+ */
+export function resolveGitHooksDir(targetRoot = process.cwd()) {
+  const dotGit = path.join(targetRoot, ".git");
+  if (!fs.existsSync(dotGit)) {
+    return null;
+  }
+  try {
+    const proc = spawnSync("git", ["rev-parse", "--git-path", "hooks"], {
+      cwd: targetRoot,
+      encoding: "utf8",
+      timeout: 5000,
+      env: {
+        ...process.env,
+        GIT_CEILING_DIRECTORIES: path.dirname(path.resolve(targetRoot)),
+      },
+    });
+    if (proc.status === 0 && proc.stdout && proc.stdout.trim()) {
+      return path.resolve(targetRoot, proc.stdout.trim());
+    }
+  } catch {
+    // Fallback below
+  }
+  const commonGitDir = resolveGitCommonDir(targetRoot);
+  return commonGitDir ? path.join(commonGitDir, "hooks") : null;
+}
+
+/**
  * Install Git pre-commit & reference-transaction hooks and/or .agents/hooks.json Stop hook.
  */
 export function installHooks(targetRoot = process.cwd(), options = {}) {
@@ -88,9 +117,8 @@ export function installHooks(targetRoot = process.cwd(), options = {}) {
   const actions = [];
 
   if (installGit) {
-    const gitDir = resolveGitCommonDir(targetRoot);
-    if (gitDir) {
-      const hooksDir = path.join(gitDir, "hooks");
+    const hooksDir = resolveGitHooksDir(targetRoot);
+    if (hooksDir) {
       fs.mkdirSync(hooksDir, { recursive: true });
       const preCommitPath = path.join(hooksDir, "pre-commit");
 
