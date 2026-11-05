@@ -1,0 +1,12 @@
+{
+  "harness-doctor-guard": {
+    "enabled": true,
+    "Stop": [
+      {
+        "type": "command",
+        "command": "harness hook run --agent",
+        "timeout": 30
+      }
+    ]
+  }
+}

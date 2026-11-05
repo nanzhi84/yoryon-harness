@@ -578,6 +578,92 @@ export function resolveAgentWorktreePaths(mainRepoRoot, options = {}) {
   };
 }
 
+function hasActiveGitLock(dirPath) {
+  if (!dirPath || !fs.existsSync(dirPath)) return false;
+  const candidates = [
+    path.join(dirPath, "index.lock"),
+    path.join(dirPath, "HEAD.lock"),
+    path.join(dirPath, "config.lock"),
+    path.join(dirPath, ".git", "index.lock"),
+    path.join(dirPath, ".git", "HEAD.lock"),
+  ];
+  return candidates.some((p) => fs.existsSync(p));
+}
+
+function loadRepoHarnessJson(repoRoot) {
+  try {
+    const p = path.join(repoRoot, ".agents", "harness.json");
+    if (fs.existsSync(p) && fs.statSync(p).isFile()) {
+      return JSON.parse(fs.readFileSync(p, "utf8")) || {};
+    }
+  } catch {
+    // Ignore invalid JSON
+  }
+  return {};
+}
+
+/**
+ * Automatically symlink declared `worktreeSharedPaths` (e.g., `["tests/fixtures", ".env.test"]`)
+ * from the main repository root into a linked Git worktree when running inside a worktree.
+ */
+export function ensureWorktreeSharedPaths(targetRoot = process.cwd()) {
+  const commonGitDir = resolveGitCommonDir(targetRoot);
+  if (!commonGitDir) {
+    return { linked: [] };
+  }
+  const mainRepoRoot = path.dirname(commonGitDir);
+  if (
+    path.resolve(targetRoot) === path.resolve(mainRepoRoot) ||
+    safeRealpath(targetRoot) === safeRealpath(mainRepoRoot)
+  ) {
+    return { linked: [] };
+  }
+
+  const wtConfig = loadRepoHarnessJson(targetRoot);
+  const mainConfig = loadRepoHarnessJson(mainRepoRoot);
+  const sharedPaths = new Set([
+    ...(Array.isArray(mainConfig.worktreeSharedPaths) ? mainConfig.worktreeSharedPaths : []),
+    ...(Array.isArray(wtConfig.worktreeSharedPaths) ? wtConfig.worktreeSharedPaths : []),
+  ]);
+
+  const linked = [];
+  for (const rawRel of sharedPaths) {
+    if (typeof rawRel !== "string" || !rawRel.trim()) continue;
+    const relPath = rawRel.trim().replace(/^\/+|\/+$/g, "");
+    if (!relPath || path.isAbsolute(relPath)) continue;
+
+    const srcAbs = path.resolve(mainRepoRoot, relPath);
+    const destAbs = path.resolve(targetRoot, relPath);
+    if (
+      !isStrictDescendantPath(srcAbs, path.resolve(mainRepoRoot)) ||
+      !isStrictDescendantPath(destAbs, path.resolve(targetRoot))
+    ) {
+      continue;
+    }
+
+    if (!fs.existsSync(srcAbs)) continue;
+    try {
+      const existingStat = fs.lstatSync(destAbs, { throwIfNoEntry: false });
+      if (existingStat) {
+        if (existingStat.isSymbolicLink() && !fs.existsSync(destAbs)) {
+          fs.rmSync(destAbs, { force: true });
+        } else {
+          continue;
+        }
+      }
+
+      fs.mkdirSync(path.dirname(destAbs), { recursive: true });
+      const srcStat = fs.statSync(srcAbs);
+      fs.symlinkSync(srcAbs, destAbs, srcStat.isDirectory() ? "dir" : "file");
+      linked.push(relPath);
+    } catch {
+      // Ignore transient symlink errors
+    }
+  }
+
+  return { linked };
+}
+
 /**
  * Reconcile and prune stale Git worktree metadata (.git/worktrees/*),
  * orphaned ghost worktree directories across configured Agents,
@@ -596,12 +682,51 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
     return { prunedWorktrees: [], removedGhostDirs: [], refreshedServerInfo: false };
   }
 
+  // PROP-08: Abort destructive worktree GC if the common .git directory currently holds an active lock
+  if (hasActiveGitLock(commonGitDir)) {
+    return { prunedWorktrees: [], removedGhostDirs: [], refreshedServerInfo: false };
+  }
+
   const mainRepoRoot = path.dirname(commonGitDir);
   const mainRepoReal = safeRealpath(mainRepoRoot);
+  const repoHarnessConfig = loadRepoHarnessJson(mainRepoRoot);
+  const rawCooldown =
+    options.cooldownMs !== undefined
+      ? options.cooldownMs
+      : process.env.HARNESS_WORKTREE_COOLDOWN_MS !== undefined
+      ? process.env.HARNESS_WORKTREE_COOLDOWN_MS
+      : repoHarnessConfig.worktreeCooldownMs;
+  const explicitCooldownMs =
+    rawCooldown !== undefined && rawCooldown !== null && rawCooldown !== ""
+      ? parseDurationMs(typeof rawCooldown === "number" ? `${rawCooldown}ms` : String(rawCooldown))
+      : 0;
+  const defaultNonEmptyCooldownMs = explicitCooldownMs > 0 ? explicitCooldownMs : 10000;
+  const now = Date.now();
+
+  const isCoolingDown = (dirPath, { requireExplicitOrNonEmpty = false } = {}) => {
+    if (!fs.existsSync(dirPath)) return false;
+    if (hasActiveGitLock(dirPath)) return true;
+    try {
+      const entries = fs.readdirSync(dirPath).filter((n) => n !== ".DS_Store");
+      const thresholdMs =
+        explicitCooldownMs > 0
+          ? explicitCooldownMs
+          : requireExplicitOrNonEmpty && entries.length > 0
+          ? defaultNonEmptyCooldownMs
+          : 0;
+      if (thresholdMs <= 0) return false;
+      const { mtimeMs } = statTree(dirPath);
+      return now - mtimeMs < thresholdMs;
+    } catch {
+      return false;
+    }
+  };
+
   const worktreesMetaDir = path.join(commonGitDir, "worktrees");
   const prunedWorktrees = [];
   const removedGhostDirs = [];
   const activeWorktreePaths = new Set([path.resolve(mainRepoRoot), mainRepoReal]);
+  let hasCoolingWorktreeMeta = false;
 
   const recordPruned = (name) => {
     if (name && !prunedWorktrees.includes(name)) {
@@ -620,7 +745,8 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
       const wtEntryDir = path.join(worktreesMetaDir, wtName);
       try {
         if (!fs.statSync(wtEntryDir).isDirectory()) continue;
-        const isLocked = fs.existsSync(path.join(wtEntryDir, "locked"));
+        const isLocked =
+          fs.existsSync(path.join(wtEntryDir, "locked")) || hasActiveGitLock(wtEntryDir);
 
         const gitdirFile = path.join(wtEntryDir, "gitdir");
         if (!fs.existsSync(gitdirFile)) continue;
@@ -630,8 +756,15 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
 
         const wtGitFile = path.resolve(wtEntryDir, rawTarget);
         const wtPhysicalDir = path.dirname(wtGitFile);
+        const hasGitLink = fs.existsSync(wtGitFile) && fs.existsSync(wtPhysicalDir);
+        const cooling =
+          isCoolingDown(wtEntryDir) ||
+          isCoolingDown(wtPhysicalDir, { requireExplicitOrNonEmpty: true });
 
-        if (isLocked || (fs.existsSync(wtGitFile) && fs.existsSync(wtPhysicalDir))) {
+        if (isLocked || cooling || hasGitLink) {
+          if (!hasGitLink) {
+            hasCoolingWorktreeMeta = true;
+          }
           activeWorktreePaths.add(path.resolve(wtPhysicalDir));
           activeWorktreePaths.add(safeRealpath(wtPhysicalDir));
           continue;
@@ -666,7 +799,7 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
     }
   }
 
-  if (!dryRun) {
+  if (!dryRun && !hasCoolingWorktreeMeta) {
     spawnSync("git", ["worktree", "prune", "--expire", "now"], {
       cwd: mainRepoRoot,
       encoding: "utf8",
@@ -692,6 +825,11 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
         const resolvedEntry = path.resolve(entryPath);
         const realEntry = safeRealpath(entryPath);
         if (activeWorktreePaths.has(resolvedEntry) || activeWorktreePaths.has(realEntry)) {
+          continue;
+        }
+        if (isCoolingDown(entryPath, { requireExplicitOrNonEmpty: true })) {
+          activeWorktreePaths.add(resolvedEntry);
+          activeWorktreePaths.add(realEntry);
           continue;
         }
         if (!hasValidWorktreeGitLink(entryPath)) {
@@ -766,7 +904,8 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
                 const realP = safeRealpath(p);
                 return (
                   fs.existsSync(resolvedP) &&
-                  hasValidWorktreeGitLink(resolvedP) &&
+                  (hasValidWorktreeGitLink(resolvedP) ||
+                    isCoolingDown(resolvedP, { requireExplicitOrNonEmpty: true })) &&
                   (activeWorktreePaths.has(resolvedP) || activeWorktreePaths.has(realP))
                 );
               });
@@ -779,7 +918,8 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
                   fs.existsSync(p) &&
                   path.resolve(p) !== path.resolve(mainRepoRoot) &&
                   isInsideWorktreeContainers(p, worktreeContainerDirs, mainRepoRoot) &&
-                  !hasValidWorktreeGitLink(p)
+                  !hasValidWorktreeGitLink(p) &&
+                  !isCoolingDown(p, { requireExplicitOrNonEmpty: true })
                 ) {
                   if (!dryRun) {
                     fs.rmSync(p, { recursive: true, force: true });

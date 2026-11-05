@@ -1,5 +1,6 @@
 # Universal Harness runtime & verification sandboxes
 work/
 artifacts/
+.agents/teamwork/
 node_modules/
 .DS_Store

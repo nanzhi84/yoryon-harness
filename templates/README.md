@@ -1,5 +1,5 @@
 <p align="center">
-  <!-- <img src="docs/assets/logo.svg" alt="Project Logo" width="96"> -->
+  <!-- <img src="docs/reference/logo.svg" alt="Project Logo" width="96"> -->
 </p>
 
 <h1 align="center">项目名称</h1>

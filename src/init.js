@@ -155,7 +155,6 @@ export function runSync(targetRoot = process.cwd()) {
     console.log(`  ${line}`);
   }
 
-  if (resolveGitCommonDir(targetRoot)) {
-    installHooks(targetRoot, { git: true, agents: false });
-  }
+  const hasGit = Boolean(resolveGitCommonDir(targetRoot));
+  installHooks(targetRoot, { git: hasGit, agents: true });
 }

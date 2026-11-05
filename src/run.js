@@ -1,7 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { cleanSandboxes } from "./clean.js";
+import { cleanSandboxes, ensureWorktreeSharedPaths } from "./clean.js";
+import { buildNormalizedEnv } from "./hook.js";
 
 function formatTimestamp(date = new Date()) {
   const pad = (n) => String(n).padStart(2, "0");
@@ -33,6 +34,7 @@ export async function runSandboxTask(targetRoot, taskName, cmdArgs) {
   }
 
   try {
+    ensureWorktreeSharedPaths(targetRoot);
     cleanSandboxes(targetRoot, { quiet: true });
   } catch {
     // Ignore transient cleanup error before starting new sandbox run
@@ -55,7 +57,7 @@ export async function runSandboxTask(targetRoot, taskName, cmdArgs) {
 
   const startedAt = new Date();
   const env = {
-    ...process.env,
+    ...buildNormalizedEnv(targetRoot),
     HARNESS_RUN_ID: runId,
     HARNESS_TASK_NAME: slug,
     HARNESS_WORK_DIR: workDir,

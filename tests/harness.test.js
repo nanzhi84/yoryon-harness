@@ -1,4 +1,3 @@
-// harness-ignore TST002: black-box test fixture generator for TST002 rule
 import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -13,17 +12,27 @@ function runCli(cwd, args, options = {}) {
   return spawnSync(process.execPath, [CLI_BIN, ...args], {
     cwd,
     encoding: "utf8",
+    timeout: 15000,
     ...options,
   });
 }
 
-function main() {
-  const sandboxRoot = path.join(REPO_ROOT, "work", "blackbox-test-repo");
-  fs.rmSync(sandboxRoot, { recursive: true, force: true });
-  fs.mkdirSync(sandboxRoot, { recursive: true });
+function describe(_name, fn) {
+  fn();
+}
 
-  try {
-    // 1. Empty directory fails HAR001 & GIT001
+function it(_name, fn) {
+  fn();
+}
+
+describe("TestUniversalHarness", () => {
+  it("test_cli_lifecycle_and_guardrails_pass_blackbox_contracts", () => {
+    const sandboxRoot = path.join(REPO_ROOT, "work", "blackbox-test-repo");
+    fs.rmSync(sandboxRoot, { recursive: true, force: true });
+    fs.mkdirSync(sandboxRoot, { recursive: true });
+
+    try {
+      // 1. Empty directory fails HAR001 & GIT001
   const failEmpty = runCli(sandboxRoot, ["doctor", "--json"]);
   assert.equal(failEmpty.status, 1);
   const emptyReport = JSON.parse(failEmpty.stdout);
@@ -428,19 +437,19 @@ function main() {
 
   // 9. Git Worktree Metadata & Ghost Directory GC (harness hook install --git & harness clean --worktrees)
   assert.equal(
-    spawnSync("git", ["init"], { cwd: sandboxRoot, encoding: "utf8" }).status,
+    spawnSync("git", ["init"], { cwd: sandboxRoot, encoding: "utf8", timeout: 5000 }).status,
     0
   );
   assert.equal(
-    spawnSync("git", ["config", "user.name", "Harness Test"], { cwd: sandboxRoot, encoding: "utf8" }).status,
+    spawnSync("git", ["config", "user.name", "Harness Test"], { cwd: sandboxRoot, encoding: "utf8", timeout: 5000 }).status,
     0
   );
   assert.equal(
-    spawnSync("git", ["config", "user.email", "test@example.com"], { cwd: sandboxRoot, encoding: "utf8" }).status,
+    spawnSync("git", ["config", "user.email", "test@example.com"], { cwd: sandboxRoot, encoding: "utf8", timeout: 5000 }).status,
     0
   );
   assert.equal(
-    spawnSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: sandboxRoot, encoding: "utf8" }).status,
+    spawnSync("git", ["commit", "--allow-empty", "-m", "init"], { cwd: sandboxRoot, encoding: "utf8", timeout: 5000 }).status,
     0
   );
 
@@ -449,6 +458,7 @@ function main() {
   const wtAddRes = spawnSync("git", ["worktree", "add", "-b", "feat/wt-ghost", wtGhostDir], {
     cwd: sandboxRoot,
     encoding: "utf8",
+    timeout: 5000,
   });
   assert.equal(wtAddRes.status, 0, wtAddRes.stderr);
 
@@ -465,8 +475,18 @@ function main() {
   assert.equal(hookGitFromRootRes.status, 0, hookGitFromRootRes.stderr);
   assert.equal(fs.existsSync(refTxHookPath), true);
 
+  // PROP-06: Verify pre-commit hook exports node_modules/.bin, .venv/bin, and .cargo/bin
+  const preCommitHookContent = fs.readFileSync(
+    path.join(sandboxRoot, ".git", "hooks", "pre-commit"),
+    "utf8"
+  );
+  assert.ok(preCommitHookContent.includes("$PWD/node_modules/.bin"));
+  assert.ok(preCommitHookContent.includes("$PWD/.venv/bin"));
+  assert.ok(preCommitHookContent.includes("$HOME/.cargo/bin"));
+  assert.ok(preCommitHookContent.includes("--staged"));
+
   assert.equal(
-    spawnSync("git", ["update-server-info"], { cwd: sandboxRoot, encoding: "utf8" }).status,
+    spawnSync("git", ["update-server-info"], { cwd: sandboxRoot, encoding: "utf8", timeout: 5000 }).status,
     0
   );
   const infoRefsPath = path.join(sandboxRoot, ".git", "info", "refs");
@@ -585,6 +605,7 @@ function main() {
   const delBranchRes = spawnSync("git", ["branch", "-D", "feat/wt-ghost"], {
     cwd: sandboxRoot,
     encoding: "utf8",
+    timeout: 5000,
   });
   assert.equal(delBranchRes.status, 0, delBranchRes.stderr);
 
@@ -607,11 +628,681 @@ function main() {
     "defaultBranch pointing to a deleted branch should be reconciled to active main repo branch"
   );
 
-  console.log("✓ All black-box integration contract tests passed.");
-  } finally {
-    // Clean up test sandbox
-    fs.rmSync(sandboxRoot, { recursive: true, force: true });
-  }
-}
+  // 10. PROP-08: Worktree cleanup liveness protection (mtime cooldown & .git/index.lock guard)
+  const coolingWtDir = path.join(customAgentWtContainer, "concurrent-checkout-wt");
+  fs.mkdirSync(coolingWtDir, { recursive: true });
+  fs.writeFileSync(path.join(coolingWtDir, "checking-out.txt"), "in progress\n", "utf8");
+  const cleanCoolingRes = runCli(sandboxRoot, ["clean", "--worktrees"]);
+  assert.equal(cleanCoolingRes.status, 0);
+  assert.equal(
+    fs.existsSync(coolingWtDir),
+    true,
+    "Non-empty worktree dir within mtime cooldown window must NOT be deleted"
+  );
 
-main();
+  // Also test .git/index.lock guard on empty dir
+  const lockedEmptyWtDir = path.join(customAgentWtContainer, "locked-wt");
+  fs.mkdirSync(lockedEmptyWtDir, { recursive: true });
+  const gitIndexLock = path.join(sandboxRoot, ".git", "index.lock");
+  fs.writeFileSync(gitIndexLock, "lock\n", "utf8");
+  runCli(sandboxRoot, ["clean", "--worktrees"]);
+  assert.equal(
+    fs.existsSync(lockedEmptyWtDir),
+    true,
+    "Worktree GC must abort when .git/index.lock is active"
+  );
+  fs.rmSync(gitIndexLock, { force: true });
+  fs.rmSync(coolingWtDir, { recursive: true, force: true });
+  fs.rmSync(lockedEmptyWtDir, { recursive: true, force: true });
+
+  // 11. PROP-07: worktreeSharedPaths auto-symlinking in linked Git worktrees
+  fs.appendFileSync(path.join(sandboxRoot, ".gitignore"), "\ntests/fixtures/\n.env.test\n", "utf8");
+  const mainFixturesDir = path.join(sandboxRoot, "tests", "fixtures");
+  fs.mkdirSync(mainFixturesDir, { recursive: true });
+  fs.writeFileSync(path.join(mainFixturesDir, "sample.json"), '{"id":1}\n', "utf8");
+  fs.writeFileSync(path.join(sandboxRoot, ".env.test"), "TEST_MODE=1\n", "utf8");
+  fs.writeFileSync(
+    path.join(sandboxRoot, ".agents", "harness.json"),
+    JSON.stringify(
+      {
+        worktreeSharedPaths: ["tests/fixtures", ".env.test"],
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  const linkedWtDir = path.join(sandboxRoot, "work", "wt-shared-test");
+  assert.equal(
+    spawnSync("git", ["worktree", "add", "-b", "feat/wt-shared", linkedWtDir], {
+      cwd: sandboxRoot,
+      encoding: "utf8",
+      timeout: 5000,
+    }).status,
+    0
+  );
+  assert.equal(fs.existsSync(path.join(linkedWtDir, "tests", "fixtures", "sample.json")), false);
+  assert.equal(fs.existsSync(path.join(linkedWtDir, ".env.test")), false);
+
+  const runInWtRes = runCli(linkedWtDir, ["run", "check-shared", "--", "node", "-e", "process.exit(0)"]);
+  assert.equal(runInWtRes.status, 0, runInWtRes.stderr);
+  assert.equal(
+    fs.existsSync(path.join(linkedWtDir, "tests", "fixtures", "sample.json")),
+    true,
+    "tests/fixtures should be auto-symlinked into linked worktree"
+  );
+  assert.equal(
+    fs.lstatSync(path.join(linkedWtDir, "tests", "fixtures")).isSymbolicLink(),
+    true
+  );
+  assert.equal(
+    fs.existsSync(path.join(linkedWtDir, ".env.test")),
+    true,
+    ".env.test should be auto-symlinked into linked worktree"
+  );
+  spawnSync("git", ["worktree", "remove", "--force", linkedWtDir], {
+    cwd: sandboxRoot,
+    encoding: "utf8",
+    timeout: 5000,
+  });
+  spawnSync("git", ["branch", "-D", "feat/wt-shared"], {
+    cwd: sandboxRoot,
+    encoding: "utf8",
+    timeout: 5000,
+  });
+
+  // 12. PROP-09 (DIR001) & PROP-11 (Git-aware dynamic scanner)
+  const rogueResearchDir = path.join(sandboxRoot, "docs", "research");
+  const rogueAssetsDir = path.join(sandboxRoot, "docs", "assets");
+  fs.mkdirSync(rogueResearchDir, { recursive: true });
+  fs.mkdirSync(rogueAssetsDir, { recursive: true });
+  fs.writeFileSync(path.join(rogueResearchDir, "notes.md"), "# Notes\n", "utf8");
+  fs.writeFileSync(path.join(rogueAssetsDir, "diagram.svg"), "<svg/>\n", "utf8");
+  const rogueRootPng = path.join(sandboxRoot, "frame_00.png");
+  fs.writeFileSync(rogueRootPng, "binary-png-data", "utf8");
+
+  const dir001Report = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+  assert.ok(
+    dir001Report.diagnostics.some((d) => d.code === "DIR001" && d.file === "docs/research"),
+    "Unauthorized docs/research/ directory must trigger DIR001"
+  );
+  assert.ok(
+    dir001Report.diagnostics.some((d) => d.code === "DIR001" && d.file === "docs/assets"),
+    "Non-standard docs/assets/ directory must trigger DIR001 (only the 5 standard docs/ subdirectories are allowed)"
+  );
+  const rootPngDiag = dir001Report.diagnostics.find(
+    (d) => d.code === "DIR001" && d.file === "frame_00.png"
+  );
+  assert.ok(rootPngDiag, "Stray root binary screenshot frame_00.png must trigger DIR001");
+  assert.ok(
+    rootPngDiag.fix &&
+      rootPngDiag.fix.includes("docs/reference/") &&
+      !rootPngDiag.fix.includes("docs/assets/"),
+    "Root binary file DIR001 fix hint must suggest 'docs/reference/' or 'work/' rather than 'docs/assets/'"
+  );
+
+  // Allowing frame_*.png via rootAllowlist in .agents/harness.json clears root DIR001
+  fs.rmSync(rogueResearchDir, { recursive: true, force: true });
+  fs.rmSync(rogueAssetsDir, { recursive: true, force: true });
+  fs.writeFileSync(
+    path.join(sandboxRoot, ".agents", "harness.json"),
+    JSON.stringify({ rootAllowlist: ["frame_*.png"] }, null, 2),
+    "utf8"
+  );
+  const allowRootReport = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+  assert.equal(
+    allowRootReport.diagnostics.some((d) => d.code === "DIR001"),
+    false,
+    "rootAllowlist pattern frame_*.png should allow frame_00.png"
+  );
+  fs.rmSync(rogueRootPng, { force: true });
+
+  // PROP-11: Git-ignored custom directory with broken links must NOT be scanned by doctor
+  fs.appendFileSync(path.join(sandboxRoot, ".gitignore"), "\ncustom_venv/\n", "utf8");
+  const customVenvDir = path.join(sandboxRoot, "custom_venv");
+  fs.mkdirSync(customVenvDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(customVenvDir, "broken.md"),
+    "根据你的要求 see [dead](missing.md)\n",
+    "utf8"
+  );
+  const gitAwareReport = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+  assert.equal(
+    gitAwareReport.diagnostics.length,
+    0,
+    "Git-ignored directory custom_venv/ must not trigger DIR001, LNK001, or VOX001"
+  );
+  fs.rmSync(customVenvDir, { recursive: true, force: true });
+
+  // 13. PROP-05 (TST001 Multi-Language TS/Vitest Extension) & PROP-12 (TST004 Subprocess Timeout Guard)
+  for (const badTsName of ["test1.test.ts", "test_phase2.spec.ts"]) {
+    const p = path.join(testsDir, badTsName);
+    fs.writeFileSync(
+      p,
+      'describe("TestCompiler", () => { it("test_input_renders_html", () => {}); });\n',
+      "utf8"
+    );
+    const rep = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+    assert.ok(
+      rep.diagnostics.some((d) => d.code === "TST001" && d.file.endsWith(badTsName)),
+      `Expected ${badTsName} to trigger TST001`
+    );
+    fs.rmSync(p, { force: true });
+  }
+
+  const tsTestFile = path.join(testsDir, "compiler.test.ts");
+  fs.writeFileSync(
+    tsTestFile,
+    'describe("Compiler", () => {\n  it("renders \'bold\' text", () => {});\n});\n',
+    "utf8"
+  );
+  const badTsHierarchyReport = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+  assert.ok(
+    badTsHierarchyReport.diagnostics.some(
+      (d) => d.code === "TST001" && d.message.includes('describe("Test<Subject>"')
+    ),
+    'Missing describe("Test<Subject>") in TS test should trigger TST001'
+  );
+  assert.ok(
+    badTsHierarchyReport.diagnostics.some(
+      (d) => d.code === "TST001" && d.message.includes("renders 'bold' text")
+    ),
+    'Non-conforming it("renders \'bold\' text") with embedded single quotes in TS test should trigger TST001'
+  );
+
+  // JS/TS test file with NO describe() or it() blocks at all must also trigger TST001
+  fs.writeFileSync(tsTestFile, 'import assert from "node:assert/strict";\nassert.equal(1, 1);\n', "utf8");
+  const zeroDescribeReport = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+  assert.ok(
+    zeroDescribeReport.diagnostics.some(
+      (d) => d.code === "TST001" && d.file.endsWith("compiler.test.ts")
+    ),
+    "JS/TS test file without describe('Test<Subject>') + it('test_...') must trigger TST001"
+  );
+
+  // Multiline describe(\n "Test...", ...) and second non-conforming top-level describe("BadSuite", ...)
+  fs.writeFileSync(
+    tsTestFile,
+    'describe(\n  "TestCompiler",\n  () => {\n    it(\n      "bad multiline name",\n      () => {}\n    );\n  }\n);\ndescribe("BadSuite", () => {\n  it("test_valid_case_passes", () => {});\n});\n',
+    "utf8"
+  );
+  const multilineTsReport = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+  assert.ok(
+    multilineTsReport.diagnostics.some(
+      (d) => d.code === "TST001" && d.message.includes("'BadSuite'")
+    ),
+    "Second top-level describe('BadSuite') must trigger TST001 even when first describe is valid"
+  );
+  assert.ok(
+    multilineTsReport.diagnostics.some(
+      (d) => d.code === "TST001" && d.message.includes("bad multiline name")
+    ),
+    "Multiline it(\\n 'bad multiline name', ...) must trigger TST001"
+  );
+
+  // Valid TS test hierarchy + regex literal containing backtick/quote + TST004 subprocess without timeout check
+  fs.writeFileSync(
+    tsTestFile,
+    'import { spawnSync } from "node:child_process";\nconst fenceRe = /`/;\nconst quoteRe = /\'/;\ndescribe("TestCompiler", () => {\n  it("test_cjk_delimiter_renders_strong_tag", () => {\n    if (fenceRe.test("`") && !quoteRe.test("x")) {\n      spawnSync("curl", ["--connect-timeout=5", "https://example.com"]);\n    }\n  });\n});\n',
+    "utf8"
+  );
+  const tst004FailReport = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+  assert.equal(
+    tst004FailReport.diagnostics.some((d) => d.code === "TST001"),
+    false,
+    "Valid TS describe('TestCompiler') + it('test_cjk_delimiter_renders_strong_tag') must pass TST001"
+  );
+  assert.ok(
+    tst004FailReport.diagnostics.some((d) => d.code === "TST004"),
+    "spawnSync without timeout option after regex literal /`/ must still trigger TST004 (regex literal must not desynchronize string masking)"
+  );
+
+  // Adding timeout option and RegExp.prototype.test("...") calls resolves TST004 and passes TST001 without false positives
+  fs.writeFileSync(
+    tsTestFile,
+    'import { spawnSync } from "node:child_process";\nconst slugPattern = /^[a-z0-9-]+$/;\ndescribe("TestCompiler", () => {\n  it("test_cjk_delimiter_renders_strong_tag", () => {\n    if (/^bold$/.test("bold") && slugPattern.test("valid-slug")) {\n      spawnSync(\n        "sh",\n        ["-c", "case $x in a) echo ok ;; esac"],\n        { timeout: 5000 }\n      );\n    }\n  });\n});\n',
+    "utf8"
+  );
+  const tst004PassReport = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+  assert.equal(
+    tst004PassReport.diagnostics.some((d) => d.code === "TST001"),
+    false,
+    "RegExp.prototype.test('...') inside TS test file must NOT trigger false-positive TST001"
+  );
+  assert.equal(
+    tst004PassReport.diagnostics.some((d) => d.code === "TST004"),
+    false,
+    "spawnSync with explicit timeout and unmatched ')' inside string arg must pass TST004"
+  );
+  fs.rmSync(tsTestFile, { force: true });
+
+  // 14. PROP-01 (TST003 Protected Verifier/Baseline Paths) & PROP-02 (MTX001 Protected Matrix Immutable Columns)
+  const verifierFile = path.join(sandboxRoot, "tests", "verifiers", "wechat", "verifier.js");
+  fs.mkdirSync(path.dirname(verifierFile), { recursive: true });
+  fs.writeFileSync(verifierFile, "// official baseline verifier\nexport const verify = () => true;\n", "utf8");
+
+  const matrixFile = path.join(sandboxRoot, "docs", "runbooks", "source-adaptation-matrix.csv");
+  fs.writeFileSync(
+    matrixFile,
+    'source_id,官方入口 URL,notes,status\ndd-uk,https://www.legislation.gov.uk/all,"official index, line 1\nline 2",pending\ndd-us,https://uscode.house.gov/browse,"us code",pending\n',
+    "utf8"
+  );
+
+  fs.writeFileSync(
+    path.join(sandboxRoot, ".agents", "harness.json"),
+    JSON.stringify(
+      {
+        protectedPaths: ["tests/verifiers/**"],
+        protectedMatrices: [
+          {
+            path: "docs/runbooks/source-adaptation-matrix.csv",
+            immutableColumns: ["source_id", "官方入口 URL"],
+          },
+        ],
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  // Untracked file inside protectedPaths must trigger TST003 even before git add
+  const preStageReport = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+  assert.ok(
+    preStageReport.diagnostics.some(
+      (d) => d.code === "TST003" && d.file === "tests/verifiers/wechat/verifier.js"
+    ),
+    "Untracked file inside protectedPaths must trigger TST003 before staging"
+  );
+
+  assert.equal(
+    spawnSync("git", ["add", "-A"], { cwd: sandboxRoot, encoding: "utf8", timeout: 5000 }).status,
+    0
+  );
+  // Without HARNESS_ALLOW_PROTECTED=1, pre-commit hook blocks committing changes to protectedPaths
+  assert.equal(
+    spawnSync("git", ["commit", "-m", "chore: lock verifiers and matrix baseline"], {
+      cwd: sandboxRoot,
+      encoding: "utf8",
+      timeout: 5000,
+    }).status,
+    1,
+    "pre-commit hook must block committing protectedPaths without HARNESS_ALLOW_PROTECTED=1"
+  );
+  // With HARNESS_ALLOW_PROTECTED=1, initial baseline commit is authorized
+  assert.equal(
+    spawnSync("git", ["commit", "-m", "chore: lock verifiers and matrix baseline"], {
+      cwd: sandboxRoot,
+      encoding: "utf8",
+      timeout: 5000,
+      env: { ...process.env, HARNESS_ALLOW_PROTECTED: "1" },
+    }).status,
+    0
+  );
+  assert.equal(runCli(sandboxRoot, ["doctor"]).status, 0);
+
+  // Inserting a new row at the top of the protected CSV while keeping baseline rows intact must NOT trigger MTX001
+  fs.writeFileSync(
+    matrixFile,
+    'source_id,官方入口 URL,notes,status\ndd-new,https://new.example.gov/index,"new source",pending\ndd-uk,https://www.legislation.gov.uk/all,"official index, line 1\nline 2",adapted\ndd-us,https://uscode.house.gov/browse,"us code",pending\n',
+    "utf8"
+  );
+  const insertedRowReport = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+  assert.equal(
+    insertedRowReport.diagnostics.some((d) => d.code === "MTX001"),
+    false,
+    "Inserting a new row at the top of a protected CSV must NOT trigger false-positive MTX001 when baseline rows are intact"
+  );
+
+  // Tamper with protected verifier (even adding // harness-ignore TST003 inside it!) and immutable matrix URL column (with inserted row at top)
+  fs.writeFileSync(
+    verifierFile,
+    "// harness-ignore TST003: agent attempting to self-authorize verifier edit\nexport const verify = () => true;\n",
+    "utf8"
+  );
+  fs.writeFileSync(
+    matrixFile,
+    'source_id,官方入口 URL,notes,status\ndd-new,https://new.example.gov/index,"new source",pending\ndd-uk,https://example.com/single-article.html,"updated note, line 1\nline 2",adapted\ndd-us,https://uscode.house.gov/browse,"us code",pending\n',
+    "utf8"
+  );
+
+  const tamperReport = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+  assert.ok(
+    tamperReport.diagnostics.some(
+      (d) => d.code === "TST003" && d.file === "tests/verifiers/wechat/verifier.js"
+    ),
+    "Modifying protected verifier file must trigger TST003 even if // harness-ignore TST003 is injected into the file"
+  );
+  assert.ok(
+    tamperReport.diagnostics.some(
+      (d) =>
+        d.code === "MTX001" &&
+        d.file === "docs/runbooks/source-adaptation-matrix.csv" &&
+        d.message.includes("官方入口 URL") &&
+        d.message.includes("https://www.legislation.gov.uk/all")
+    ),
+    "Modifying immutable column '官方入口 URL' on a shifted row must trigger MTX001 with the matched row's HEAD value"
+  );
+
+  // HARNESS_ALLOW_PROTECTED=1 bypasses both TST003 and MTX001 when maintainer authorizes baseline update
+  const bypassReport = JSON.parse(
+    runCli(sandboxRoot, ["doctor", "--json"], {
+      env: { ...process.env, HARNESS_ALLOW_PROTECTED: "1" },
+    }).stdout
+  );
+  assert.equal(
+    bypassReport.diagnostics.some((d) => d.code === "TST003" || d.code === "MTX001"),
+    false,
+    "HARNESS_ALLOW_PROTECTED=1 must bypass both TST003 and MTX001"
+  );
+
+  // Running harness hook run --agent auto-reverts tampered matrix cell while preserving the newly inserted top row, multiline 'notes', and 'status'
+  const mtxHookRes = runCli(sandboxRoot, ["hook", "run", "--agent"], {
+    input: JSON.stringify({ terminationReason: "NO_TOOL_CALL" }),
+  });
+  assert.equal(mtxHookRes.status, 2);
+  const mtxHookJson = JSON.parse(mtxHookRes.stdout.trim());
+  assert.equal(mtxHookJson.decision, "continue");
+  assert.ok(mtxHookJson.reason.includes("[MTX001]"));
+  assert.ok(mtxHookJson.reason.includes("Auto-reverted"));
+
+  const revertedMatrixContent = fs.readFileSync(matrixFile, "utf8");
+  assert.ok(
+    revertedMatrixContent.includes('dd-new,https://new.example.gov/index,"new source",pending'),
+    "Hook must preserve newly inserted row at the top of the CSV when reverting tampered baseline row"
+  );
+  assert.ok(
+    revertedMatrixContent.includes("https://www.legislation.gov.uk/all"),
+    "Hook must auto-revert tampered '官方入口 URL' cell back to HEAD value"
+  );
+  assert.ok(
+    revertedMatrixContent.includes('"updated note, line 1\nline 2",adapted'),
+    "Hook must preserve RFC-4180 multiline quoted cell and mutable 'status' column when reverting immutable column"
+  );
+
+  // Revert verifier and matrix files and verify clean pass
+  spawnSync(
+    "git",
+    [
+      "checkout",
+      "HEAD",
+      "--",
+      "tests/verifiers/wechat/verifier.js",
+      "docs/runbooks/source-adaptation-matrix.csv",
+    ],
+    {
+      cwd: sandboxRoot,
+      encoding: "utf8",
+      timeout: 5000,
+    }
+  );
+  assert.equal(runCli(sandboxRoot, ["doctor"]).status, 0);
+
+  // 15. PROP-12: AST001 (Declarative Layer Dependency Guard) & AST002 (Core Cleanliness Guard)
+  const cleanerPy = path.join(sandboxRoot, "src", "wlh", "cleaners", "text.py");
+  const cleanerSubTs = path.join(sandboxRoot, "src", "wlh", "cleaners", "sub", "dom.ts");
+  const parserPy = path.join(sandboxRoot, "src", "wlh", "processor", "html.py");
+  const parserCommentPy = path.join(sandboxRoot, "src", "wlh", "processor", "safe.py");
+  fs.mkdirSync(path.dirname(cleanerSubTs), { recursive: true });
+  fs.mkdirSync(path.dirname(parserPy), { recursive: true });
+  // Test Python `from wlh import processor`
+  fs.writeFileSync(
+    cleanerPy,
+    "from wlh import processor\n\ndef clean(t):\n    return t\n",
+    "utf8"
+  );
+  // Test JS/TS `export const a = "from x";` and un-semicoloned `export { a }` preceding multiline `import {\n  parseDoc,\n} from "../../processor/html"`
+  fs.writeFileSync(
+    cleanerSubTs,
+    'export const a = "from x";\nexport { a }\nimport {\n  parseDoc,\n} from "../../processor/html";\nexport const cleanDom = () => parseDoc();\n',
+    "utf8"
+  );
+  fs.writeFileSync(
+    parserPy,
+    'from wlh.cleaners.text import clean\n\nSITE_RULE = "dd-uk-101"\n',
+    "utf8"
+  );
+  // Comment mentioning dd-uk-101 and docstring containing fake import must NOT trigger false-positive AST001/AST002
+  fs.writeFileSync(
+    parserCommentPy,
+    '"""\nfrom wlh.unknown_layer import forbidden\n"""\n# Historical note: site rules like dd-uk-101 belong in adapters, not here\nexport_flag = True\n',
+    "utf8"
+  );
+
+  fs.writeFileSync(
+    path.join(sandboxRoot, ".agents", "harness.json"),
+    JSON.stringify(
+      {
+        architecture: {
+          layers: [
+            { name: "cleaners", path: "src/wlh/cleaners/**", allowImportsFrom: [] },
+            { name: "parsers", path: "src/wlh/processor/**", allowImportsFrom: ["cleaners"] },
+          ],
+          coreCleanliness: [
+            {
+              paths: ["src/wlh/processor/**"],
+              forbiddenPatterns: ["\\bdd-[a-z0-9-]+\\b"],
+            },
+          ],
+        },
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+
+  const astReport = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+  assert.ok(
+    astReport.diagnostics.some(
+      (d) => d.code === "AST001" && d.file === "src/wlh/cleaners/text.py"
+    ),
+    "Disallowed Python `from wlh import processor` from cleaners -> parsers must trigger AST001"
+  );
+  assert.ok(
+    astReport.diagnostics.some(
+      (d) =>
+        d.code === "AST001" &&
+        d.file === "src/wlh/cleaners/sub/dom.ts" &&
+        d.line === 3
+    ),
+    "Disallowed multiline TS import after `export const a = 'from x';` and `export { a }` from cleaners/sub -> processor must trigger AST001 at line 3"
+  );
+  assert.equal(
+    astReport.diagnostics.some(
+      (d) => d.code === "AST001" && d.file === "src/wlh/processor/html.py"
+    ),
+    false,
+    "Allowed import from parsers -> cleaners must NOT trigger AST001"
+  );
+  assert.ok(
+    astReport.diagnostics.some(
+      (d) => d.code === "AST002" && d.file === "src/wlh/processor/html.py"
+    ),
+    "Forbidden pattern dd-uk-101 in core processor module code must trigger AST002"
+  );
+  assert.equal(
+    astReport.diagnostics.some(
+      (d) => d.code === "AST002" && d.file === "src/wlh/processor/safe.py"
+    ),
+    false,
+    "Comment mentioning dd-uk-101 in core module must NOT trigger false-positive AST002"
+  );
+
+  fs.rmSync(path.join(sandboxRoot, "src"), { recursive: true, force: true });
+  fs.writeFileSync(path.join(sandboxRoot, ".agents", "harness.json"), "{}\n", "utf8");
+
+  // 16. PROP-10: Incremental formatting gate (ruff format --check & prettier --check + --staged)
+  fs.writeFileSync(
+    ruffBin,
+    `#!/bin/sh\nif [ "$1" = "format" ]; then\n  for arg in "$@"; do\n    if [ "$arg" = "src/unstaged_bad.py" ] || [ "$arg" = "src/app.py" ]; then\n      echo "Would reformat: $arg"\n      exit 1\n    fi\n  done\n  exit 0\nfi\nprintf '%s\\n' '[]'\nexit 0\n`,
+    { mode: 0o755 }
+  );
+  fs.chmodSync(ruffBin, 0o755);
+  fs.mkdirSync(path.join(sandboxRoot, "src"), { recursive: true });
+  fs.writeFileSync(path.join(sandboxRoot, "src", "app.py"), "x=1\n", "utf8");
+
+  const ruffFmtBlockRes = runCli(sandboxRoot, ["hook", "run", "--agent"], {
+    input: JSON.stringify({ terminationReason: "NO_TOOL_CALL" }),
+  });
+  const ruffFmtJson = JSON.parse(ruffFmtBlockRes.stdout.trim());
+  assert.equal(ruffFmtJson.decision, "continue");
+  assert.ok(
+    ruffFmtJson.reason.includes("[ruff-format]") && ruffFmtJson.reason.includes("src/app.py"),
+    "Unformatted Python file must be blocked by [ruff-format] in hook"
+  );
+
+  // Test `--staged`: staged formatted file `src/staged_good.py` passes `--staged` even when `src/unstaged_bad.py` is unformatted in working tree
+  fs.rmSync(path.join(sandboxRoot, "src", "app.py"), { force: true });
+  fs.writeFileSync(path.join(sandboxRoot, "src", "staged_good.py"), "x = 1\n", "utf8");
+  fs.writeFileSync(path.join(sandboxRoot, "src", "unstaged_bad.py"), "y=2\n", "utf8");
+  assert.equal(
+    spawnSync("git", ["add", "src/staged_good.py"], {
+      cwd: sandboxRoot,
+      encoding: "utf8",
+      timeout: 5000,
+    }).status,
+    0
+  );
+  const stagedOnlyPassRes = runCli(sandboxRoot, ["hook", "run", "--staged"]);
+  assert.equal(
+    stagedOnlyPassRes.status,
+    0,
+    `harness hook run --staged must pass when staged file is clean even if unstaged file is unformatted: ${stagedOnlyPassRes.stderr}`
+  );
+  // Once unstaged_bad.py is staged, `harness hook run --staged` must fail
+  assert.equal(
+    spawnSync("git", ["add", "src/unstaged_bad.py"], {
+      cwd: sandboxRoot,
+      encoding: "utf8",
+      timeout: 5000,
+    }).status,
+    0
+  );
+  const stagedBadFailRes = runCli(sandboxRoot, ["hook", "run", "--staged"]);
+  assert.equal(
+    stagedBadFailRes.status,
+    1,
+    "harness hook run --staged must fail when an unformatted Python file is staged"
+  );
+  assert.ok(stagedBadFailRes.stderr.includes("src/unstaged_bad.py"));
+  spawnSync("git", ["reset", "HEAD", "--", "src/staged_good.py", "src/unstaged_bad.py"], {
+    cwd: sandboxRoot,
+    encoding: "utf8",
+    timeout: 5000,
+  });
+  fs.rmSync(path.join(sandboxRoot, "src", "staged_good.py"), { force: true });
+  fs.rmSync(path.join(sandboxRoot, "src", "unstaged_bad.py"), { force: true });
+
+  // Restore clean ruff mock and test prettier --check via node_modules/.bin/prettier
+  fs.writeFileSync(
+    ruffBin,
+    `#!/bin/sh\nprintf '%s\\n' '[]'\nexit 0\n`,
+    { mode: 0o755 }
+  );
+  fs.chmodSync(ruffBin, 0o755);
+
+  const prettierNodeBinDir = path.join(sandboxRoot, "node_modules", ".bin");
+  fs.mkdirSync(prettierNodeBinDir, { recursive: true });
+  const prettierBin = path.join(prettierNodeBinDir, "prettier");
+  fs.writeFileSync(
+    prettierBin,
+    `#!/bin/sh\necho "[warn] src/ui.ts"\necho "[warn] Code style issues found in the above file. Run Prettier with --write to fix."\nexit 1\n`,
+    { mode: 0o755 }
+  );
+  fs.chmodSync(prettierBin, 0o755);
+  fs.writeFileSync(path.join(sandboxRoot, ".prettierrc"), "{}\n", "utf8");
+  fs.writeFileSync(path.join(sandboxRoot, "src", "ui.ts"), "export const x=1;\n", "utf8");
+
+  const prettierBlockRes = runCli(sandboxRoot, ["hook", "run", "--agent"], {
+    input: JSON.stringify({ terminationReason: "NO_TOOL_CALL" }),
+  });
+  const prettierJson = JSON.parse(prettierBlockRes.stdout.trim());
+  assert.equal(prettierJson.decision, "continue");
+  assert.ok(
+    prettierJson.reason.includes("[prettier]") && prettierJson.reason.includes("src/ui.ts"),
+    "Unformatted TS file must be blocked by [prettier] in hook"
+  );
+
+  fs.rmSync(path.join(sandboxRoot, "node_modules"), { recursive: true, force: true });
+  fs.rmSync(path.join(sandboxRoot, ".prettierrc"), { force: true });
+  fs.rmSync(path.join(sandboxRoot, "src"), { recursive: true, force: true });
+
+  // 17. PROP-03 (harness tdd verify) & PROP-04 (harness sync auto-installs .agents/hooks.json)
+  fs.mkdirSync(path.join(sandboxRoot, "src"), { recursive: true });
+  const calcPath = path.join(sandboxRoot, "src", "calc.js");
+  fs.writeFileSync(calcPath, "export function multiply(a, b) { return 0; }\n", "utf8");
+  assert.equal(
+    spawnSync("git", ["add", "-A"], { cwd: sandboxRoot, encoding: "utf8", timeout: 5000 }).status,
+    0
+  );
+  assert.equal(
+    spawnSync("git", ["commit", "-m", "feat: stub multiply"], {
+      cwd: sandboxRoot,
+      encoding: "utf8",
+      timeout: 5000,
+    }).status,
+    0
+  );
+
+  // Modify implementation, add a new subpackage directory, and write real test checking both
+  fs.writeFileSync(calcPath, "export function multiply(a, b) { return a * b; }\n", "utf8");
+  const newPkgFile = path.join(sandboxRoot, "src", "newpkg", "helper.js");
+  fs.mkdirSync(path.dirname(newPkgFile), { recursive: true });
+  fs.writeFileSync(newPkgFile, "export const READY = true;\n", "utf8");
+
+  const calcTestPath = path.join(testsDir, "calc.test.mjs");
+  fs.writeFileSync(
+    calcTestPath,
+    'import fs from "node:fs";\nimport assert from "node:assert/strict";\nimport { multiply } from "../src/calc.js";\nassert.equal(fs.existsSync("./src/newpkg"), true, "newpkg dir must not exist during Red phase");\nassert.equal(multiply(6, 7), 42);\n',
+    "utf8"
+  );
+
+  const tddPassRes = runCli(sandboxRoot, [
+    "tdd",
+    "verify",
+    "--test",
+    "node ./tests/calc.test.mjs",
+  ]);
+  assert.equal(tddPassRes.status, 0, tddPassRes.stderr);
+  assert.ok(tddPassRes.stdout.includes("Red-Green TDD contract verified"));
+  assert.equal(
+    fs.existsSync(newPkgFile),
+    true,
+    "Newly created implementation file and parent directory must be restored after tdd verify"
+  );
+
+  // Tautological test that passes even on old baseline MUST fail Red Check in harness tdd verify
+  fs.writeFileSync(calcTestPath, 'import assert from "node:assert/strict";\nassert.equal(1, 1);\n', "utf8");
+  const tddFailRedRes = runCli(sandboxRoot, [
+    "tdd",
+    "verify",
+    "--test",
+    "node ./tests/calc.test.mjs",
+  ]);
+  assert.equal(tddFailRedRes.status, 1, "Tautological test must fail harness tdd verify Red Check");
+  assert.ok(tddFailRedRes.stderr.includes("Red Check failed"));
+
+  // Verify implementation file was faithfully restored after Red Check failure
+  assert.ok(
+    fs.readFileSync(calcPath, "utf8").includes("return a * b;"),
+    "Implementation file must be restored after tdd verify"
+  );
+
+  // PROP-04: Verify harness sync automatically ensures .agents/hooks.json exists
+  fs.rmSync(path.join(sandboxRoot, ".agents", "hooks.json"), { force: true });
+  assert.equal(runCli(sandboxRoot, ["sync"]).status, 0);
+  assert.equal(
+    fs.existsSync(path.join(sandboxRoot, ".agents", "hooks.json")),
+    true,
+    "harness sync must automatically configure .agents/hooks.json Stop hook"
+  );
+
+  console.log("✓ All black-box integration contract tests passed.");
+    } finally {
+      // Clean up test sandbox
+      fs.rmSync(sandboxRoot, { recursive: true, force: true });
+    }
+  });
+});
+

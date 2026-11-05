@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/logo.svg" alt="yoryon-harness" width="112">
+  <img src="docs/reference/logo.svg" alt="yoryon-harness" width="112">
 </p>
 
 <h1 align="center">yoryon-harness</h1>

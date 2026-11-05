@@ -2,19 +2,23 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { checkWorkspace } from "./doctor.js";
-import { cleanSandboxes, resolveGitCommonDir } from "./clean.js";
+import { checkWorkspace, restoreProtectedMatrices } from "./doctor.js";
+import {
+  cleanSandboxes,
+  ensureWorktreeSharedPaths,
+  resolveGitCommonDir,
+} from "./clean.js";
 
-const HOOK_PATH_EXPORT =
-  'export PATH="$PWD/.venv/bin:$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"';
+export const HOOK_PATH_EXPORT =
+  'export PATH="$PWD/.venv/bin:$PWD/node_modules/.bin:$HOME/.cargo/bin:$HOME/.local/bin:$HOME/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"';
 
 const PRE_COMMIT_MARKER = "# yoryon-harness pre-commit hook";
 const PRE_COMMIT_SNIPPET = `${PRE_COMMIT_MARKER}
 ${HOOK_PATH_EXPORT}
 if command -v harness >/dev/null 2>&1; then
-  harness hook run
+  harness hook run --staged
 elif [ -f "./bin/harness.js" ]; then
-  node ./bin/harness.js hook run
+  node ./bin/harness.js hook run --staged
 fi
 `;
 
@@ -29,6 +33,51 @@ if [ "$1" = "committed" ]; then
   fi
 fi
 `;
+
+/**
+ * PROP-06: Build normalized PATH covering project-local virtualenvs and multi-language user toolchains.
+ */
+export function buildNormalizedPath(targetRoot = process.cwd(), basePath = process.env.PATH || "") {
+  const home = os.homedir();
+  const candidateDirs = [
+    path.join(targetRoot, ".venv", "bin"),
+    path.join(targetRoot, "node_modules", ".bin"),
+  ];
+  const commonGitDir = resolveGitCommonDir(targetRoot);
+  if (commonGitDir) {
+    const mainRepoRoot = path.dirname(commonGitDir);
+    if (path.resolve(mainRepoRoot) !== path.resolve(targetRoot)) {
+      candidateDirs.push(
+        path.join(mainRepoRoot, ".venv", "bin"),
+        path.join(mainRepoRoot, "node_modules", ".bin")
+      );
+    }
+  }
+  candidateDirs.push(
+    path.join(home, ".cargo", "bin"),
+    path.join(home, ".local", "bin"),
+    path.join(home, ".npm-global", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin"
+  );
+  const existingParts = basePath.split(path.delimiter).filter(Boolean);
+  const seen = new Set();
+  const merged = [];
+  for (const dir of [...candidateDirs, ...existingParts]) {
+    if (!seen.has(dir)) {
+      seen.add(dir);
+      merged.push(dir);
+    }
+  }
+  return merged.join(path.delimiter);
+}
+
+export function buildNormalizedEnv(targetRoot = process.cwd(), baseEnv = process.env) {
+  return {
+    ...baseEnv,
+    PATH: buildNormalizedPath(targetRoot, baseEnv.PATH || ""),
+  };
+}
 
 /**
  * Install Git pre-commit & reference-transaction hooks and/or .agents/hooks.json Stop hook.
@@ -151,8 +200,8 @@ function isExecutableFile(filePath) {
   }
 }
 
-function findInPath(binName) {
-  const pathEnv = process.env.PATH || "";
+function findInPath(binName, targetRoot = process.cwd()) {
+  const pathEnv = buildNormalizedPath(targetRoot);
   for (const dir of pathEnv.split(path.delimiter)) {
     if (!dir) continue;
     const candidate = path.join(dir, binName);
@@ -168,7 +217,7 @@ function findPyrefly(targetRoot) {
   if (isExecutableFile(venvPyrefly)) {
     return venvPyrefly;
   }
-  const whichPyrefly = findInPath("pyrefly");
+  const whichPyrefly = findInPath("pyrefly", targetRoot);
   if (whichPyrefly) {
     return whichPyrefly;
   }
@@ -190,12 +239,85 @@ function findPyrefly(targetRoot) {
 }
 
 /**
- * Run zero-tolerance static type checks (Pyright, Pyrefly, TypeScript) if configured in targetRoot.
+ * PROP-10: Collect incrementally modified/added files from Git (`--staged` or `HEAD`).
+ * Returns `null` if `targetRoot` is not a Git repository.
  */
-export function checkStaticTypes(targetRoot = process.cwd()) {
+export function getChangedFiles(targetRoot = process.cwd(), { staged = false } = {}) {
+  if (!fs.existsSync(path.join(targetRoot, ".git"))) {
+    return null;
+  }
+  const files = new Set();
+  const addFromZ = (stdout) => {
+    if (!stdout) return;
+    for (const f of stdout.split("\0")) {
+      if (!f) continue;
+      const rel = f.split(path.sep).join("/");
+      const abs = path.join(targetRoot, rel);
+      if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+        files.add(rel);
+      }
+    }
+  };
+
+  if (staged) {
+    const cached = spawnSync(
+      "git",
+      ["-c", "core.quotePath=false", "diff", "--name-only", "--cached", "--diff-filter=ACMR", "-z"],
+      { cwd: targetRoot, encoding: "utf8", timeout: 5000 }
+    );
+    if (cached.status === 0) {
+      addFromZ(cached.stdout);
+      return [...files];
+    }
+    return null;
+  }
+
+  const headDiff = spawnSync(
+    "git",
+    ["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=ACMR", "HEAD", "-z"],
+    { cwd: targetRoot, encoding: "utf8", timeout: 5000 }
+  );
+  if (headDiff.status === 0) {
+    addFromZ(headDiff.stdout);
+  }
+  const worktreeDiff = spawnSync(
+    "git",
+    ["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=ACMR", "-z"],
+    { cwd: targetRoot, encoding: "utf8", timeout: 5000 }
+  );
+  if (worktreeDiff.status === 0) {
+    addFromZ(worktreeDiff.stdout);
+  }
+  const cachedDiff = spawnSync(
+    "git",
+    ["-c", "core.quotePath=false", "diff", "--name-only", "--cached", "--diff-filter=ACMR", "-z"],
+    { cwd: targetRoot, encoding: "utf8", timeout: 5000 }
+  );
+  if (cachedDiff.status === 0) {
+    addFromZ(cachedDiff.stdout);
+  }
+  const untracked = spawnSync(
+    "git",
+    ["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "-z"],
+    { cwd: targetRoot, encoding: "utf8", timeout: 5000 }
+  );
+  if (untracked.status === 0) {
+    addFromZ(untracked.stdout);
+  }
+  return [...files];
+}
+
+/**
+ * Run zero-tolerance static type, linter, and incremental formatting checks
+ * (Pyright, Pyrefly, Ruff, Ruff Format, ESLint, Prettier, TypeScript) if configured in targetRoot.
+ */
+export function checkStaticTypes(targetRoot = process.cwd(), options = {}) {
+  const { staged = false } = options;
   const issues = [];
   let errorCount = 0;
   let warningCount = 0;
+  const childEnv = buildNormalizedEnv(targetRoot);
+  const changedFiles = getChangedFiles(targetRoot, { staged });
 
   const hasPyproject = fs.existsSync(path.join(targetRoot, "pyproject.toml"));
   const hasPyrightConfig = fs.existsSync(path.join(targetRoot, "pyrightconfig.json"));
@@ -218,14 +340,14 @@ export function checkStaticTypes(targetRoot = process.cwd()) {
   if (isPythonProject) {
     let pyrightCmd = null;
     const uvCandidate =
-      findInPath("uv") || path.join(os.homedir(), ".local", "bin", "uv");
+      findInPath("uv", targetRoot) || path.join(os.homedir(), ".local", "bin", "uv");
 
     if (isExecutableFile(venvPyright) && isExecutableFile(venvPython)) {
       pyrightCmd = [venvPyright, ["--pythonpath", venvPython, "--outputjson"]];
     } else if (isExecutableFile(venvPyright)) {
       pyrightCmd = [venvPyright, ["--outputjson"]];
-    } else if (findInPath("pyright")) {
-      pyrightCmd = [findInPath("pyright"), ["--outputjson"]];
+    } else if (findInPath("pyright", targetRoot)) {
+      pyrightCmd = [findInPath("pyright", targetRoot), ["--outputjson"]];
     } else if (isExecutableFile(uvCandidate)) {
       pyrightCmd = [uvCandidate, ["run", "pyright", "--outputjson"]];
     }
@@ -234,6 +356,7 @@ export function checkStaticTypes(targetRoot = process.cwd()) {
       try {
         const proc = spawnSync(pyrightCmd[0], pyrightCmd[1], {
           cwd: targetRoot,
+          env: childEnv,
           encoding: "utf8",
           timeout: 25000,
         });
@@ -304,6 +427,7 @@ export function checkStaticTypes(targetRoot = process.cwd()) {
           ["check", "--min-severity=warn", "--output-format=json"],
           {
             cwd: targetRoot,
+            env: childEnv,
             encoding: "utf8",
             timeout: 15000,
           }
@@ -337,58 +461,115 @@ export function checkStaticTypes(targetRoot = process.cwd()) {
       }
     }
 
-    // Ruff Python Linter check
+    // Ruff Python Linter & Incremental Format Check (PROP-10)
     const ruffBin = isExecutableFile(venvRuff)
       ? venvRuff
-      : findInPath("ruff");
+      : findInPath("ruff", targetRoot);
     if (ruffBin) {
-      try {
-        const procRuff = spawnSync(
-          ruffBin,
-          ["check", "--output-format=json"],
-          {
+      const changedPyFiles = Array.isArray(changedFiles)
+        ? changedFiles.filter((f) => /\.pyi?$/i.test(f))
+        : null;
+      const shouldRunRuff = changedPyFiles === null || !staged || changedPyFiles.length > 0;
+
+      if (shouldRunRuff) {
+        const ruffCheckArgs =
+          Array.isArray(changedPyFiles) && changedPyFiles.length > 0
+            ? ["check", "--output-format=json", ...changedPyFiles]
+            : ["check", "--output-format=json"];
+        try {
+          const procRuff = spawnSync(ruffBin, ruffCheckArgs, {
             cwd: targetRoot,
+            env: childEnv,
             encoding: "utf8",
             timeout: 15000,
-          }
-        );
-        if (procRuff.stdout) {
-          const ruffReport = JSON.parse(procRuff.stdout);
-          const ruffItems = Array.isArray(ruffReport) ? ruffReport : [];
-          for (const item of ruffItems.slice(0, 30)) {
-            if (!item || typeof item !== "object") continue;
-            errorCount += 1;
-            const rawFile = String(item.filename || "");
-            let relPath = rawFile;
-            if (rawFile) {
-              try {
-                const candidateRel = path.relative(
-                  targetRoot,
-                  path.resolve(targetRoot, rawFile)
-                );
-                if (!candidateRel.startsWith("..")) {
-                  relPath = candidateRel.split(path.sep).join("/");
+          });
+          if (procRuff.stdout) {
+            const ruffReport = JSON.parse(procRuff.stdout);
+            const ruffItems = Array.isArray(ruffReport) ? ruffReport : [];
+            for (const item of ruffItems.slice(0, 30)) {
+              if (!item || typeof item !== "object") continue;
+              errorCount += 1;
+              const rawFile = String(item.filename || "");
+              let relPath = rawFile;
+              if (rawFile) {
+                try {
+                  const candidateRel = path.relative(
+                    targetRoot,
+                    path.resolve(targetRoot, rawFile)
+                  );
+                  if (!candidateRel.startsWith("..")) {
+                    relPath = candidateRel.split(path.sep).join("/");
+                  }
+                } catch {
+                  relPath = rawFile;
                 }
-              } catch {
-                relPath = rawFile;
+              }
+              const loc =
+                item.location && typeof item.location === "object"
+                  ? item.location
+                  : {};
+              const lineNo = Number(loc.row || 1);
+              const colNo = Number(loc.column || 1);
+              const code = String(item.code || "");
+              const codeSuffix = code ? ` (${code})` : "";
+              const msg = String(item.message || "").replace(/\r?\n/g, " ");
+              issues.push(
+                `- [ruff] ${relPath}:${lineNo}:${colNo} [error]${codeSuffix} ${msg}`
+              );
+            }
+          }
+        } catch {
+          // Ignore if ruff execution fails to return JSON
+        }
+      }
+
+      // Incremental ruff format --check on changed Python files (PROP-10)
+      const fmtTargets =
+        Array.isArray(changedPyFiles) && changedPyFiles.length > 0
+          ? changedPyFiles
+          : changedPyFiles === null
+          ? ["."]
+          : [];
+      if (fmtTargets.length > 0) {
+        try {
+          const procRuffFmt = spawnSync(
+            ruffBin,
+            ["format", "--check", ...fmtTargets],
+            {
+              cwd: targetRoot,
+              env: childEnv,
+              encoding: "utf8",
+              timeout: 15000,
+            }
+          );
+          if (procRuffFmt.status !== 0) {
+            const combinedOut = `${procRuffFmt.stdout || ""}\n${procRuffFmt.stderr || ""}`;
+            const reformatMatches = [];
+            for (const line of combinedOut.split(/\r?\n/)) {
+              const m = line.match(/^Would reformat:\s*(.+)$/i);
+              if (m && m[1]) {
+                reformatMatches.push(m[1].trim());
               }
             }
-            const loc =
-              item.location && typeof item.location === "object"
-                ? item.location
-                : {};
-            const lineNo = Number(loc.row || 1);
-            const colNo = Number(loc.column || 1);
-            const code = String(item.code || "");
-            const codeSuffix = code ? ` (${code})` : "";
-            const msg = String(item.message || "").replace(/\r?\n/g, " ");
-            issues.push(
-              `- [ruff] ${relPath}:${lineNo}:${colNo} [error]${codeSuffix} ${msg}`
-            );
+            if (reformatMatches.length === 0) {
+              for (const f of fmtTargets.slice(0, 30)) {
+                errorCount += 1;
+                issues.push(
+                  `- [ruff-format] ${f}:1:1 [error] File is not formatted; run \`ruff format ${f}\`.`
+                );
+              }
+            } else {
+              for (const unformattedFile of reformatMatches.slice(0, 30)) {
+                errorCount += 1;
+                issues.push(
+                  `- [ruff-format] ${unformattedFile}:1:1 [error] File is not formatted; run \`ruff format ${unformattedFile}\`.`
+                );
+              }
+            }
           }
+        } catch {
+          // Ignore ruff format invocation errors
         }
-      } catch {
-        // Ignore if ruff execution fails to return JSON
       }
     }
   }
@@ -413,60 +594,156 @@ export function checkStaticTypes(targetRoot = process.cwd()) {
     const localEslint = path.join(targetRoot, "node_modules", ".bin", "eslint");
     const eslintBin = isExecutableFile(localEslint)
       ? localEslint
-      : findInPath("eslint");
+      : findInPath("eslint", targetRoot);
     if (eslintBin) {
-      try {
-        const procEslint = spawnSync(eslintBin, [".", "--format=json"], {
-          cwd: targetRoot,
-          encoding: "utf8",
-          timeout: 25000,
-        });
-        if (procEslint.stdout) {
-          const eslintReport = JSON.parse(procEslint.stdout);
-          const filesList = Array.isArray(eslintReport) ? eslintReport : [];
-          for (const fileEntry of filesList) {
-            if (!fileEntry || typeof fileEntry !== "object") continue;
-            const rawFile = String(fileEntry.filePath || "");
-            let relPath = rawFile;
-            if (rawFile) {
-              try {
-                const candidateRel = path.relative(
-                  targetRoot,
-                  path.resolve(targetRoot, rawFile)
-                );
-                if (!candidateRel.startsWith("..")) {
-                  relPath = candidateRel.split(path.sep).join("/");
+      const changedJsTsFiles = Array.isArray(changedFiles)
+        ? changedFiles.filter((f) => /\.(?:[jt]sx?|[mc]?js)$/i.test(f))
+        : null;
+      const shouldRunEslint =
+        changedJsTsFiles === null || !staged || changedJsTsFiles.length > 0;
+
+      if (shouldRunEslint) {
+        const eslintArgs =
+          Array.isArray(changedJsTsFiles) && changedJsTsFiles.length > 0
+            ? [...changedJsTsFiles, "--format=json"]
+            : [".", "--format=json"];
+        try {
+          const procEslint = spawnSync(eslintBin, eslintArgs, {
+            cwd: targetRoot,
+            env: childEnv,
+            encoding: "utf8",
+            timeout: 25000,
+          });
+          if (procEslint.stdout) {
+            const eslintReport = JSON.parse(procEslint.stdout);
+            const filesList = Array.isArray(eslintReport) ? eslintReport : [];
+            for (const fileEntry of filesList) {
+              if (!fileEntry || typeof fileEntry !== "object") continue;
+              const rawFile = String(fileEntry.filePath || "");
+              let relPath = rawFile;
+              if (rawFile) {
+                try {
+                  const candidateRel = path.relative(
+                    targetRoot,
+                    path.resolve(targetRoot, rawFile)
+                  );
+                  if (!candidateRel.startsWith("..")) {
+                    relPath = candidateRel.split(path.sep).join("/");
+                  }
+                } catch {
+                  relPath = rawFile;
                 }
-              } catch {
-                relPath = rawFile;
               }
-            }
-            const messages = Array.isArray(fileEntry.messages)
-              ? fileEntry.messages
-              : [];
-            for (const m of messages.slice(0, 30)) {
-              if (!m || typeof m !== "object") continue;
-              const sevNum = Number(m.severity || 1);
-              if (sevNum < 1) continue;
-              const sev = sevNum >= 2 ? "error" : "warning";
-              if (sev === "error") {
-                errorCount += 1;
-              } else {
-                warningCount += 1;
+              const messages = Array.isArray(fileEntry.messages)
+                ? fileEntry.messages
+                : [];
+              for (const m of messages.slice(0, 30)) {
+                if (!m || typeof m !== "object") continue;
+                const sevNum = Number(m.severity || 1);
+                if (sevNum < 1) continue;
+                const sev = sevNum >= 2 ? "error" : "warning";
+                if (sev === "error") {
+                  errorCount += 1;
+                } else {
+                  warningCount += 1;
+                }
+                const lineNo = Number(m.line || 1);
+                const colNo = Number(m.column || 1);
+                const ruleId = String(m.ruleId || "");
+                const ruleSuffix = ruleId ? ` (${ruleId})` : "";
+                const msg = String(m.message || "").replace(/\r?\n/g, " ");
+                issues.push(
+                  `- [eslint] ${relPath}:${lineNo}:${colNo} [${sev}]${ruleSuffix} ${msg}`
+                );
               }
-              const lineNo = Number(m.line || 1);
-              const colNo = Number(m.column || 1);
-              const ruleId = String(m.ruleId || "");
-              const ruleSuffix = ruleId ? ` (${ruleId})` : "";
-              const msg = String(m.message || "").replace(/\r?\n/g, " ");
-              issues.push(
-                `- [eslint] ${relPath}:${lineNo}:${colNo} [${sev}]${ruleSuffix} ${msg}`
-              );
             }
           }
+        } catch {
+          // Ignore if eslint execution fails to return JSON
         }
-      } catch {
-        // Ignore if eslint execution fails to return JSON
+      }
+    }
+  }
+
+  // Prettier incremental format check (PROP-10, if Prettier config exists)
+  const prettierConfigFiles = [
+    ".prettierrc",
+    ".prettierrc.json",
+    ".prettierrc.js",
+    ".prettierrc.cjs",
+    ".prettierrc.mjs",
+    ".prettierrc.yaml",
+    ".prettierrc.yml",
+    "prettier.config.js",
+    "prettier.config.mjs",
+    "prettier.config.cjs",
+  ];
+  let hasPrettierConfig = prettierConfigFiles.some((f) =>
+    fs.existsSync(path.join(targetRoot, f))
+  );
+  if (!hasPrettierConfig && fs.existsSync(path.join(targetRoot, "package.json"))) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(targetRoot, "package.json"), "utf8"));
+      if (pkg && typeof pkg === "object" && pkg.prettier) {
+        hasPrettierConfig = true;
+      }
+    } catch {
+      // Ignore malformed package.json
+    }
+  }
+  if (hasPrettierConfig) {
+    const localPrettier = path.join(targetRoot, "node_modules", ".bin", "prettier");
+    const prettierBin = isExecutableFile(localPrettier)
+      ? localPrettier
+      : findInPath("prettier", targetRoot);
+    if (prettierBin) {
+      const changedPrettierFiles = Array.isArray(changedFiles)
+        ? changedFiles.filter((f) =>
+            /\.(?:[jt]sx?|[mc]?js|json|css|scss|html|ya?ml)$/i.test(f)
+          )
+        : ["."];
+      if (changedPrettierFiles.length > 0) {
+        try {
+          const procPrettier = spawnSync(
+            prettierBin,
+            ["--check", ...changedPrettierFiles],
+            {
+              cwd: targetRoot,
+              env: childEnv,
+              encoding: "utf8",
+              timeout: 15000,
+            }
+          );
+          if (procPrettier.status !== 0) {
+            const out = `${procPrettier.stdout || ""}\n${procPrettier.stderr || ""}`;
+            let matchedAny = false;
+            for (const line of out.split(/\r?\n/)) {
+              const warnMatch = line.match(/^\[warn\]\s+(.+)$/);
+              if (
+                warnMatch &&
+                warnMatch[1] &&
+                !warnMatch[1].startsWith("Code style issues")
+              ) {
+                const fileStr = warnMatch[1].trim();
+                matchedAny = true;
+                errorCount += 1;
+                issues.push(
+                  `- [prettier] ${fileStr}:1:1 [error] File is not formatted; run \`prettier --write ${fileStr}\`.`
+                );
+              }
+            }
+            if (!matchedAny) {
+              for (const f of changedPrettierFiles.slice(0, 30)) {
+                errorCount += 1;
+                issues.push(
+                  `- [prettier] ${f}:1:1 [error] File is not formatted; run \`prettier --write ${f}\`.`
+                );
+              }
+            }
+          }
+        } catch {
+          // Ignore prettier execution failure
+        }
       }
     }
   }
@@ -475,11 +752,14 @@ export function checkStaticTypes(targetRoot = process.cwd()) {
   const tsconfigPath = path.join(targetRoot, "tsconfig.json");
   if (fs.existsSync(tsconfigPath)) {
     const localTsc = path.join(targetRoot, "node_modules", ".bin", "tsc");
-    const tscBin = isExecutableFile(localTsc) ? localTsc : findInPath("tsc");
+    const tscBin = isExecutableFile(localTsc)
+      ? localTsc
+      : findInPath("tsc", targetRoot);
     if (tscBin) {
       try {
         const procTsc = spawnSync(tscBin, ["--noEmit", "--pretty", "false"], {
           cwd: targetRoot,
+          env: childEnv,
           encoding: "utf8",
           timeout: 25000,
         });
@@ -510,12 +790,15 @@ export function checkStaticTypes(targetRoot = process.cwd()) {
 }
 
 /**
- * Execute hook check (`harness hook run [--agent]`).
+ * Execute hook check (`harness hook run [--agent] [--staged]`).
  * When `--agent` is set and issues are found, outputs Antigravity Stop hook JSON
  * (`{"decision":"continue","reason":"..."}`) and exits with code 2 so coding agents
  * are blocked from stopping and automatically repair documentation, test contracts, and static type errors.
  */
-export function runHook(targetRoot = process.cwd(), { agentMode = false } = {}) {
+export function runHook(
+  targetRoot = process.cwd(),
+  { agentMode = false, staged = false } = {}
+) {
   if (agentMode && !process.stdin.isTTY) {
     let payload = {};
     try {
@@ -541,13 +824,31 @@ export function runHook(targetRoot = process.cwd(), { agentMode = false } = {}) 
   }
 
   try {
+    ensureWorktreeSharedPaths(targetRoot);
     cleanSandboxes(targetRoot, { quiet: true, silent: agentMode });
   } catch {
     // Non-fatal: never block hook execution if sandbox cleanup encounters transient FS error
   }
 
   const diagnostics = checkWorkspace(targetRoot);
-  const typecheck = checkStaticTypes(targetRoot);
+
+  // PROP-02: If protected matrices were tampered with, automatically revert immutable cells from HEAD
+  if (diagnostics.some((d) => d.code === "MTX001")) {
+    try {
+      const { restoredFiles } = restoreProtectedMatrices(targetRoot);
+      if (restoredFiles.length > 0) {
+        for (const d of diagnostics) {
+          if (d.code === "MTX001") {
+            d.message += " [Auto-reverted immutable cell(s) from HEAD]";
+          }
+        }
+      }
+    } catch {
+      // Ignore auto-revert failure
+    }
+  }
+
+  const typecheck = checkStaticTypes(targetRoot, { staged });
   const hasTypeIssues =
     typecheck.issues.length > 0 ||
     typecheck.errorCount > 0 ||

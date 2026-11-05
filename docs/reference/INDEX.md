@@ -4,4 +4,6 @@
 
 | 文件路径 | 来源链接 / 背景说明 | 备注 |
 | :--- | :--- | :--- |
-| _示例：`example-spec.pdf`_ | _第三方接口规范文档_ | _初始归档_ |
+| [logo.svg](logo.svg) | `yoryon-harness` 项目門面徽标（SVG 矢量图标） | 定稿归档 |
+| [harness_recurring_issues_survey_zh.md](harness_recurring_issues_survey_zh.md) | 跨三仓（`yoryon-harness`、`WorldLawHarvester`、`MorphMD`）102 次 Git 提交实证调研与通用 Harness 演进报告（中文版） | 定稿归档 |
+| [harness_recurring_issues_survey.md](harness_recurring_issues_survey.md) | Multi-repository empirical survey & Universal Harness improvement proposals (English version) | 定稿归档 |
