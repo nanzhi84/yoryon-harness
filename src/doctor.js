@@ -14,7 +14,7 @@ export const RULES = {
     code: "DIR001",
     title: "Unauthorized file or directory in repository root or docs/",
     summary:
-      "Enforces the directory allowlist for `docs/` (`README.md` + `architecture/`, `spec/`, `adr/`, `runbooks/`, `reference/`) and repository root (standard facade docs, engineering configs, and standard code/sandbox directories, extensible via `rootAllowlist` in `.agents/harness.json`). Blocks stray binary files (`.png`, `.jpg`, `.pdf`, `.zip`, etc.), temporary scripts, and non-standard `docs/` subdirectories.",
+      "Enforces the directory allowlist for `docs/` (`README.md` + `architecture/`, `spec/`, `adr/`, `runbooks/`, `reference/`) and repository root (standard facade docs, engineering configs, and minimal universal workspace directories; project/framework directories require `rootAllowlist` in `.agents/harness.json`). Blocks stray binary files (`.png`, `.jpg`, `.pdf`, `.zip`, etc.), temporary scripts, and non-standard `docs/` subdirectories.",
     fix: "Move or remove the unauthorized file/directory, or declare project-specific root entries under `rootAllowlist` in `.agents/harness.json`.",
   },
   GIT001: {
@@ -293,62 +293,18 @@ const DEFAULT_ROOT_ALLOWED_FILES = new Set([
   "render.yaml",
 ]);
 
+// Universal workspace roles only. Project/framework directories belong in rootAllowlist.
 const DEFAULT_ROOT_ALLOWED_DIRS = new Set([
   ".git",
-  ".github",
   ".agents",
-  ".vscode",
-  ".idea",
-  ".husky",
-  ".claude",
-  ".cursor",
-  ".gemini",
-  ".venv",
-  "venv",
-  "node_modules",
   "bin",
   "src",
-  "lib",
-  "app",
-  "pkg",
-  "cmd",
-  "internal",
-  "crates",
-  "packages",
-  "apps",
-  "services",
   "docs",
   "tests",
-  "test",
-  "__tests__",
-  "e2e",
   "work",
   "artifacts",
   "experiments",
-  "templates",
-  "public",
-  "static",
-  "assets",
-  "styles",
-  "components",
-  "pages",
-  "scripts",
-  "tools",
-  "config",
-  "configs",
-  "migrations",
-  "prisma",
-  "drizzle",
-  "supabase",
-  "deploy",
-  "infra",
-  "docker",
   "dist",
-  "build",
-  "out",
-  "target",
-  "coverage",
-  ".next",
 ]);
 
 export function loadHarnessConfig(targetRoot = process.cwd()) {
@@ -756,8 +712,8 @@ function queryGitWorkspaceFiles(targetRoot) {
   }
 }
 
-function isGitIgnored(targetRoot, relPath, gitignorePatterns) {
-  if (hasIgnoredSegment(relPath)) return true;
+function isGitIgnored(targetRoot, relPath, gitignorePatterns, { scanExclusions = true } = {}) {
+  if (scanExclusions && hasIgnoredSegment(relPath)) return true;
   if (isIgnoredByGitignorePatterns(relPath, gitignorePatterns)) return true;
   if (fs.existsSync(path.join(targetRoot, ".git"))) {
     try {
@@ -1248,7 +1204,8 @@ export function checkWorkspace(targetRoot = process.cwd()) {
 
   for (const entry of fs.readdirSync(targetRoot, { withFileTypes: true })) {
     if (entry.name === ".DS_Store" || entry.name === ".gitkeep") continue;
-    if (isGitIgnored(targetRoot, entry.name, gitignorePatterns)) continue;
+    // Skipping dependency/build contents during scanning does not authorize their root directory.
+    if (isGitIgnored(targetRoot, entry.name, gitignorePatterns, { scanExclusions: false })) continue;
     if (isCustomAllowed(entry.name, customRootAllowlist)) continue;
 
     if (entry.isDirectory()) {

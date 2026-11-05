@@ -280,6 +280,8 @@ describe("TestUniversalHarness", () => {
     '[project]\nname = "sandbox-app"\nversion = "0.1.0"\n',
     "utf8"
   );
+  fs.writeFileSync(path.join(sandboxRoot, ".agents", "harness.json"),
+    JSON.stringify({ rootAllowlist: [".venv", "node_modules"] }));
   const venvBinDir = path.join(sandboxRoot, ".venv", "bin");
   fs.mkdirSync(venvBinDir, { recursive: true });
 
@@ -601,6 +603,7 @@ describe("TestUniversalHarness", () => {
     path.join(sandboxRoot, ".agents", "harness.json"),
     JSON.stringify(
       {
+        rootAllowlist: [".venv", "node_modules"],
         worktreeAgents: [
           {
             agent: "custom-agent",
@@ -753,6 +756,7 @@ describe("TestUniversalHarness", () => {
     path.join(sandboxRoot, ".agents", "harness.json"),
     JSON.stringify(
       {
+        rootAllowlist: [".venv", "node_modules"],
         worktreeSharedPaths: ["tests/fixtures", ".env.test"],
       },
       null,
@@ -800,6 +804,22 @@ describe("TestUniversalHarness", () => {
   });
 
   // 12. PROP-09 (DIR001) & PROP-11 (Git-aware dynamic scanner)
+  const genericRootDirs = [".git", ".agents", "bin", "src", "docs", "tests", "work", "artifacts", "experiments", "dist"];
+  const projectRootDirs = [".github", ".vscode", "node_modules", "apps", "packages", "public", "templates", "tools", "config", "prisma", "build"];
+  const originalIgnore = fs.readFileSync(path.join(sandboxRoot, ".gitignore"), "utf8");
+  fs.writeFileSync(path.join(sandboxRoot, ".agents", "harness.json"),
+    JSON.stringify({ rootAllowlist: [".venv"] }));
+  for (const name of projectRootDirs) {
+    assert.equal(spawnSync("git", ["check-ignore", "--", `${name}/`], {
+      cwd: sandboxRoot, encoding: "utf8", timeout: 5000,
+    }).status, 1, `${name} fixture must not be Git-ignored`);
+  }
+  for (const name of [...genericRootDirs, ...projectRootDirs]) {
+    fs.mkdirSync(path.join(sandboxRoot, name), { recursive: true });
+  }
+  for (const name of projectRootDirs) {
+    fs.writeFileSync(path.join(sandboxRoot, name, "directory-contract.txt"), "fixture\n");
+  }
   const rogueResearchDir = path.join(sandboxRoot, "docs", "research");
   const rogueAssetsDir = path.join(sandboxRoot, "docs", "assets");
   fs.mkdirSync(rogueResearchDir, { recursive: true });
@@ -808,8 +828,21 @@ describe("TestUniversalHarness", () => {
   fs.writeFileSync(path.join(rogueAssetsDir, "diagram.svg"), "<svg/>\n", "utf8");
   const rogueRootPng = path.join(sandboxRoot, "frame_00.png");
   fs.writeFileSync(rogueRootPng, "binary-png-data", "utf8");
+  const rootScriptsDir = path.join(sandboxRoot, "scripts");
+  fs.mkdirSync(rootScriptsDir, { recursive: true });
+  fs.writeFileSync(path.join(rootScriptsDir, "task.js"), "console.log('task');\n", "utf8");
 
   const dir001Report = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
+  const rejectedRootDirs = dir001Report.diagnostics
+    .filter((d) => d.code === "DIR001").map((d) => d.file);
+  assert.deepEqual(genericRootDirs.filter((name) => rejectedRootDirs.includes(name)), [],
+    "Generic harness directories must remain allowed without project declarations");
+  assert.deepEqual(projectRootDirs.filter((name) => !rejectedRootDirs.includes(name)), [],
+    "Every non-ignored technology or editor directory must require explicit rootAllowlist declaration");
+  assert.ok(
+    dir001Report.diagnostics.some((d) => d.code === "DIR001" && d.file === "scripts"),
+    "Root scripts/ directory must trigger DIR001 unless explicitly allowed by the project"
+  );
   assert.ok(
     dir001Report.diagnostics.some((d) => d.code === "DIR001" && d.file === "docs/research"),
     "Unauthorized docs/research/ directory must trigger DIR001"
@@ -829,21 +862,33 @@ describe("TestUniversalHarness", () => {
     "Root binary file DIR001 fix hint must suggest 'docs/reference/' or 'work/' rather than 'docs/assets/'"
   );
 
-  // Allowing frame_*.png via rootAllowlist in .agents/harness.json clears root DIR001
+  // Explicit project rootAllowlist entries clear root DIR001 for files and directories
   fs.rmSync(rogueResearchDir, { recursive: true, force: true });
   fs.rmSync(rogueAssetsDir, { recursive: true, force: true });
   fs.writeFileSync(
     path.join(sandboxRoot, ".agents", "harness.json"),
-    JSON.stringify({ rootAllowlist: ["frame_*.png"] }, null, 2),
+    JSON.stringify({ rootAllowlist: [".venv", "frame_*.png", "scripts", ...projectRootDirs] }, null, 2),
     "utf8"
   );
+  const projectConfigPath = path.join(sandboxRoot, ".agents", "harness.json");
+  const projectConfigBefore = fs.readFileSync(projectConfigPath, "utf8");
+  for (const command of ["init", "sync"]) {
+    assert.equal(runCli(sandboxRoot, [command]).status, 0);
+    assert.equal(fs.readFileSync(projectConfigPath, "utf8"), projectConfigBefore,
+      `${command} must preserve the project's explicit rootAllowlist unchanged`);
+  }
   const allowRootReport = JSON.parse(runCli(sandboxRoot, ["doctor", "--json"]).stdout);
   assert.equal(
     allowRootReport.diagnostics.some((d) => d.code === "DIR001"),
     false,
-    "rootAllowlist pattern frame_*.png should allow frame_00.png"
+    "rootAllowlist should allow frame_00.png via frame_*.png and explicitly allow scripts/"
   );
   fs.rmSync(rogueRootPng, { force: true });
+  fs.rmSync(rootScriptsDir, { recursive: true, force: true });
+  for (const name of projectRootDirs) {
+    fs.rmSync(path.join(sandboxRoot, name), { recursive: true, force: true });
+  }
+  fs.writeFileSync(path.join(sandboxRoot, ".gitignore"), originalIgnore);
 
   // PROP-11: Git-ignored custom directory with broken links must NOT be scanned by doctor
   fs.appendFileSync(path.join(sandboxRoot, ".gitignore"), "\ncustom_venv/\n", "utf8");
@@ -980,6 +1025,7 @@ describe("TestUniversalHarness", () => {
     path.join(sandboxRoot, ".agents", "harness.json"),
     JSON.stringify(
       {
+        rootAllowlist: [".venv", "node_modules"],
         protectedPaths: ["tests/verifiers/**"],
         protectedMatrices: [
           {
@@ -1161,6 +1207,7 @@ describe("TestUniversalHarness", () => {
     path.join(sandboxRoot, ".agents", "harness.json"),
     JSON.stringify(
       {
+        rootAllowlist: [".venv", "node_modules"],
         architecture: {
           layers: [
             { name: "cleaners", path: "src/wlh/cleaners/**", allowImportsFrom: [] },
@@ -1218,7 +1265,7 @@ describe("TestUniversalHarness", () => {
   );
 
   fs.rmSync(path.join(sandboxRoot, "src"), { recursive: true, force: true });
-  fs.writeFileSync(path.join(sandboxRoot, ".agents", "harness.json"), "{}\n", "utf8");
+  fs.writeFileSync(path.join(sandboxRoot, ".agents", "harness.json"), JSON.stringify({ rootAllowlist: [".venv", "node_modules"] }), "utf8");
 
   // 16. PROP-10: Incremental formatting gate (ruff format --check & prettier --check + --staged)
   fs.writeFileSync(

@@ -71,7 +71,7 @@ sequenceDiagram
    - `harness init` 在未传 `--force` 时，严禁覆盖目标仓库已有的任何文件；`.gitignore` 采用按行去重追加策略确保 `work/` 与 `artifacts/` 被忽略。
    - `harness sync` 仅覆盖更新通用协议文件（`AGENTS.md` 与 `docs/README.md`）并同步确保 `.git/hooks/` 与 `.agents/hooks.json` 守护钩子就绪，绝不触碰项目特异文件（`README.md`、`PROJECTS.md`、`CHANGELOG.md`、`docs/architecture/`、`docs/reference/INDEX.md`、`.agents/harness.json`）。
 2. **结构、反作弊与架构完备性（[`src/doctor.js`](../../src/doctor.js)）**：
-   - `DIR001`：`docs/` 下严格只允许 `README.md` 及 5 个标准子目录（`architecture/`、`spec/`、`adr/`、`runbooks/`、`reference/`）；仓库根目录严禁散落未授权二进制截图、压缩包或临时脚本（可通过 `.agents/harness.json` `rootAllowlist` 扩展）。
+   - `DIR001`：`docs/` 下严格只允许 `README.md` 及 5 个标准子目录（`architecture/`、`spec/`、`adr/`、`runbooks/`、`reference/`）；仓库根目录严禁散落未授权二进制截图、压缩包或临时脚本。默认根目录仅保留 `.git`、`.agents`、`bin`、`src`、`docs`、`tests`、`work`、`artifacts`、`experiments`、`dist`；项目、框架及编辑器目录必须在 `.agents/harness.json` 的 `rootAllowlist` 中显式声明（支持名称和 glob），不由核心代码预置技术栈。根目录检查仍遵循 Git 忽略规则；递归内容扫描的依赖/缓存排除名单不构成根目录放行权限。`worktreeSharedPaths` 作为项目显式共享路径声明继续放行对应顶层目录。文件白名单与 `docs/` 子目录规则不变。
    - `SPC001`、`ADR001` / `ADR002`、`REF001`、`LNK001` / `LNK002`：强制保证 Spec/ADR 生命周期位置、参考资料索引登记与本地链接/锚点精确匹配。
    - `TST001` ~ `TST004`：`tests/` 下严禁阶段/序号命名测试文件，Python（`class Test<Subject>:` + `def test_<scenario>_<expected>()`）与 TS/JS（`describe("Test<Subject>", ...)` + `it("test_<scenario>_<expected>", ...)`）对称强制层级与两段式命名；严禁业务 Mock（`TST002`）；锁定 `.agents/harness.json` `protectedPaths` 只读裁判基线（`TST003`）；强制测试内 `subprocess.run` / `spawnSync` / `execSync` 显式传入 `timeout`（`TST004`）。
    - `MTX001`、`AST001` / `AST002`：按 `.agents/harness.json` 锁定 CSV/TSV `immutableColumns` 不可篡改，以及声明式分层依赖方向与核心目录禁用字面量正则。

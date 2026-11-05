@@ -57,6 +57,16 @@ harness run verify -- npm test
 harness doctor
 ```
 
+项目特有目录通过 `.agents/harness.json` 声明，例如：
+
+```json
+{
+  "rootAllowlist": [".github", "apps", "packages", "public"]
+}
+```
+
+仅列出项目实际需要的目录，不自动放行扫描到的全部目录。`harness init` 与 `harness sync` 不覆盖已有配置；默认通用目录与忽略规则见[架构约束](docs/architecture/overview.md#3-系统不变量与边界约束)。
+
 ## Learn more
 
 - **协作规范与项目红线**：[AGENTS.md](AGENTS.md) · [PROJECTS.md](PROJECTS.md)

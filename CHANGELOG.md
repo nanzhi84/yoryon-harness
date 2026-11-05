@@ -4,7 +4,11 @@
 
 ## [Unreleased]
 
+### Changed
+- 默认根目录白名单收紧为 10 个通用工作区目录；框架、编辑器和业务目录由各项目 `.agents/harness.json` 的 `rootAllowlist` 显式声明。根目录权限不再复用递归内容扫描的依赖/构建排除名单，保留 Git 忽略及已声明共享路径语义。
+
 ### Fixed
+- 从默认根目录白名单移除 `scripts/`，统一由 `DIR001` 检查；保留项目显式 `rootAllowlist` 扩展能力。
 - 修复 hook 升级截断用户追加逻辑：为受管片段增加结束标记，识别已发布旧脚本并保留片段外原文；未知旧片段拒绝覆盖。
 - 修复 `harness tdd verify` 将新增符号链接恢复为普通文件的问题：保存文件类型与原始链接目标，支持相对、悬空链接，并按 Git 文件模式恢复红灯基线，避免写入外部链接目标。
 - 修复 `src/clean.js` 中 `cleanWorktrees` 在清理项目注册表失效 `environments` 时未校验 `worktreeContainerDirs` 容器边界的误删隐患：新增 `isInsideWorktreeContainers` 与 `isSafeWtTarget` 严格路径包含守卫，仅当失效环境路径明确位于受管 `worktreeContainerDirs` 子目录内（且非仓库根目录、家目录、文件系统根目录或仓库祖先目录）时才清理物理空壳目录，外部目录仅剔除注册表 JSON 中的失效记录而绝不触碰磁盘文件。
