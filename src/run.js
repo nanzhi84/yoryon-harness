@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { cleanSandboxes, ensureWorktreeSharedPaths } from "./clean.js";
-import { buildNormalizedEnv } from "./hook.js";
+import { buildNormalizedEnv } from "./hook-tools.js";
 
 function formatTimestamp(date = new Date()) {
   const pad = (n) => String(n).padStart(2, "0");

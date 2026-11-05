@@ -5,6 +5,8 @@
 ## [Unreleased]
 
 ### Fixed
+- 修复 hook 升级截断用户追加逻辑：为受管片段增加结束标记，识别已发布旧脚本并保留片段外原文；未知旧片段拒绝覆盖。
+- 修复 `harness tdd verify` 将新增符号链接恢复为普通文件的问题：保存文件类型与原始链接目标，支持相对、悬空链接，并按 Git 文件模式恢复红灯基线，避免写入外部链接目标。
 - 修复 `src/clean.js` 中 `cleanWorktrees` 在清理项目注册表失效 `environments` 时未校验 `worktreeContainerDirs` 容器边界的误删隐患：新增 `isInsideWorktreeContainers` 与 `isSafeWtTarget` 严格路径包含守卫，仅当失效环境路径明确位于受管 `worktreeContainerDirs` 子目录内（且非仓库根目录、家目录、文件系统根目录或仓库祖先目录）时才清理物理空壳目录，外部目录仅剔除注册表 JSON 中的失效记录而绝不触碰磁盘文件。
 - 修复 `Previous Worktrees` 在 Antigravity UI 删除或 CLI 移除后清理不彻底的问题：`src/hook.js` 中的 `.git/hooks/reference-transaction` 注入完整 `PATH` 并改为同步执行（避免后台 `&` 子进程被短生命周期 `git` 命令提前终止），`src/clean.js` 新增防重入守卫、对已移除 worktree 残留的已合并本地分支自动执行 `git branch -d` 兜底，并将项目注册表 JSON 改为 `.tmp` + `fs.renameSync` 原子替换以立即触发 `language_server` `fsnotify/kqueue` 刷新；`harness sync` 现同步自动升级 `.git/hooks/`。
 - 修复 `src/doctor.js` 巡检误扫 Python 虚拟环境与临时协作目录的问题：`IGNORED_WALK_DIRS` 新增忽略 `.venv`、`venv`、`teamwork` 及缓存目录。

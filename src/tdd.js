@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { snapshotPath, readHeadPath, restorePath } from "./tdd-files.js";
 import { ensureWorktreeSharedPaths } from "./clean.js";
-import { buildNormalizedEnv } from "./hook.js";
+import { buildNormalizedEnv } from "./hook-tools.js";
 
 function formatTimestamp(date = new Date()) {
   const pad = (n) => String(n).padStart(2, "0");
@@ -212,29 +213,11 @@ export function runTddVerify(targetRoot = process.cwd(), options = {}) {
     HARNESS_ARTIFACTS_DIR: artifactsDir,
   };
 
-  // Snapshot current working tree state of all changed implementation files
-  const backups = [];
-  for (const relPath of implFiles) {
+  // Resolve every snapshot before mutating the working tree.
+  const backups = implFiles.map((relPath) => {
     const absPath = path.join(targetRoot, relPath);
-    if (fs.existsSync(absPath) && fs.statSync(absPath).isFile()) {
-      const stat = fs.statSync(absPath);
-      backups.push({
-        relPath,
-        absPath,
-        existedOnDisk: true,
-        mode: stat.mode,
-        content: fs.readFileSync(absPath),
-      });
-    } else {
-      backups.push({
-        relPath,
-        absPath,
-        existedOnDisk: false,
-        mode: 0o644,
-        content: null,
-      });
-    }
-  }
+    return { absPath, current: snapshotPath(absPath), baseline: readHeadPath(targetRoot, relPath) };
+  });
 
   let redResult = null;
   let caughtSignal = null;
@@ -247,18 +230,8 @@ export function runTddVerify(targetRoot = process.cwd(), options = {}) {
   try {
     // Phase 1 (Red Check): Revert implementation files to HEAD baseline
     for (const item of backups) {
-      const catRes = spawnSync("git", ["show", `HEAD:${item.relPath}`], {
-        cwd: targetRoot,
-        timeout: 5000,
-        maxBuffer: 50 * 1024 * 1024,
-      });
-      if (catRes.status === 0 && catRes.stdout !== null) {
-        fs.mkdirSync(path.dirname(item.absPath), { recursive: true });
-        fs.writeFileSync(item.absPath, catRes.stdout);
-      } else if (fs.existsSync(item.absPath)) {
-        fs.rmSync(item.absPath, { force: true });
-        pruneEmptyParentsToRoot(item.absPath, targetRoot);
-      }
+      restorePath(item.absPath, item.baseline);
+      if (item.baseline.kind === "missing") pruneEmptyParentsToRoot(item.absPath, targetRoot);
     }
 
     console.log(`[harness tdd verify] Phase 1 (Red Check): running '${displayCmd}' on HEAD baseline...`);
@@ -266,14 +239,10 @@ export function runTddVerify(targetRoot = process.cwd(), options = {}) {
   } finally {
     // Always restore implementation files back to their exact working tree state
     for (const item of backups) {
-      if (item.existedOnDisk && item.content !== null) {
-        fs.mkdirSync(path.dirname(item.absPath), { recursive: true });
-        fs.writeFileSync(item.absPath, item.content, { mode: item.mode });
-      } else if (!item.existedOnDisk && fs.existsSync(item.absPath)) {
-        fs.rmSync(item.absPath, { force: true });
-        pruneEmptyParentsToRoot(item.absPath, targetRoot);
-      }
+      restorePath(item.absPath, item.current);
+      if (item.current.kind === "missing") pruneEmptyParentsToRoot(item.absPath, targetRoot);
     }
+
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
   }
