@@ -180,6 +180,7 @@ const DEFAULT_ROOT_ALLOWED_FILES = new Set([
   "SECURITY.md",
   "CONTRIBUTING.md",
   "CODE_OF_CONDUCT.md",
+  ".git",
   ".gitignore",
   ".gitattributes",
   ".gitmodules",
