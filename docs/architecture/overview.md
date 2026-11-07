@@ -30,12 +30,12 @@ flowchart TD
 ```
 
 - [bin/harness.js](../../bin/harness.js)：CLI 命令解析与子命令分发路由，不包含具体文件系统状态修改逻辑。
-- [src/init.js](../../src/init.js)：负责 `harness init` 与 `harness sync`，从 [templates/](../../templates) 读取母本并向目标仓库写入目录、通用规范及 `.agents/hooks.json` 守护钩子。
+- [src/init.js](../../src/init.js)：负责 `harness init` 与 `harness sync`，从 [templates/](../../templates) 读取母本并向目标仓库写入目录、通用规范及 Git / `.agents/hooks.json` 守护钩子。
 - [src/doctor.js](../../src/doctor.js)：负责 `harness doctor` 与 `harness rule`，结合 `git ls-files -co --exclude-standard` 动态感知忽略规则，执行目录契约与防污染白名单（`HAR001`/`DIR001`）、生命周期位置（`SPC001`/`ADR001`/`ADR002`）、三列索引（`REF001`）、多语言测试命名与反 Mock/超时/只读基线锁契约（`TST001`~`TST004`）、矩阵不可变列保护（`MTX001`）、声明式架构边界守卫（`AST001`/`AST002`）及 Markdown 本地死链/锚点检查（`LNK001`/`LNK002`）。
 - [src/hook-script.js](../../src/hook-script.js)：按起止标记替换受管片段，旧版持久化 hook 仅按已发布格式迁移；未知旧片段拒绝覆盖，原文件保持不变。用户前后脚本逐字节保留。
 - [src/hook-tools.js](../../src/hook-tools.js) 与 [src/hook-checks.js](../../src/hook-checks.js)：分别封装工具探测、环境与变更文件发现，以及现有静态检查流程。
-- [src/hook.js](../../src/hook.js)：负责 `harness hook install` 与 `harness hook run [--agent] [--staged]`，自动归一化多语言工具链 `PATH`（`.venv/bin`、`node_modules/.bin`、`~/.cargo/bin`、`~/.local/bin`），通过 Git `pre-commit`、`reference-transaction` 与 Agent `Stop` 钩子自动清理过期沙盒产物与悬空 Git worktree 元数据、自动从 `HEAD` 还原被篡改的 `MTX001` 不可变单元格、运行文档与测试契约巡检及增量代码格式/静态类型/Linter 检查（Pyright/Pyrefly/Ruff/ESLint/Prettier/TSC），拦截违规并驱动模型自修复。
-- [src/clean.js](../../src/clean.js)：负责 `harness clean`（含 `--worktrees`）及生命周期钩子触发的 `work/`、`artifacts/` 中间产物 TTL / 数量配额清理，基于 `.agents/harness.json` `worktreeSharedPaths` 在子 worktree 中自动软链主仓共享路径，以及基于 `<common_git_dir>/worktrees/*/gitdir`、`.git/index.lock` 锁探活与 mtime 冷却窗口的孤儿 worktree 空壳目录、`.git/worktrees/` 悬空元数据、项目环境注册表失效 `environments` 条目回收。
+- [src/hook.js](../../src/hook.js)：负责 `harness hook install` 与 `harness hook run [--agent] [--staged]`，自动归一化多语言工具链 `PATH`（`.venv/bin`、`node_modules/.bin`、`~/.cargo/bin`、`~/.local/bin`），自动配置本地 `git config --local fetch.prune true` 并通过 `gh repo edit <owner>/<repo> --delete-branch-on-merge` 自动开启 GitHub 远端 PR 分支自动删除（未关联 GitHub 或 `gh` 失败时输出提醒且不阻塞本地命令），通过 Git `pre-commit`、`reference-transaction` 与 Agent `Stop` 钩子自动清理过期沙盒产物、悬空 Git worktree 元数据与已合并/上游 `[gone]` 本地分支、自动从 `HEAD` 还原被篡改的 `MTX001` 不可变单元格、运行文档与测试契约巡检及增量代码格式/静态类型/Linter 检查（Pyright/Pyrefly/Ruff/ESLint/Prettier/TSC），拦截违规并驱动模型自修复。
+- [src/clean.js](../../src/clean.js)：负责 `harness clean`（含 `--worktrees`）及生命周期钩子触发的 `work/`、`artifacts/` 中间产物 TTL / 数量配额清理，基于 `.agents/harness.json` `worktreeSharedPaths` 在子 worktree 中自动软链主仓共享路径，以及基于 `<common_git_dir>/worktrees/*/gitdir`、`.git/index.lock` 锁探活与 mtime 冷却窗口的孤儿 worktree 空壳目录、`.git/worktrees/` 悬空元数据、已合并或上游远端已删除（`[gone]`）的本地分支与干净子 worktree、项目环境注册表失效 `environments` 条目回收。
 - [src/run.js](../../src/run.js)：负责 `harness run`，接管验收命令的隔离沙盒目录创建、子 worktree 共享路径自动软链、工具链环境变量注入与回执落盘。
 - [src/scaffold.js](../../src/scaffold.js)：负责 `harness spec new`、`harness adr new` 与 `harness adr supersede` 的确定性文档流转。
 

@@ -371,6 +371,65 @@ function resolveMainRepoBranch(commonGitDir) {
   return null;
 }
 
+function resolvePrimaryBranch(commonGitDir) {
+  const originHeadFile = path.join(commonGitDir, "refs", "remotes", "origin", "HEAD");
+  try {
+    if (fs.existsSync(originHeadFile)) {
+      const raw = fs.readFileSync(originHeadFile, "utf8").trim();
+      const match = raw.match(/^ref:\s*refs\/remotes\/origin\/(.+)$/);
+      if (match && match[1] && gitBranchExists(commonGitDir, match[1].trim())) {
+        return match[1].trim();
+      }
+    }
+  } catch {
+    // Ignore read errors
+  }
+  if (gitBranchExists(commonGitDir, "main")) {
+    return "main";
+  }
+  if (gitBranchExists(commonGitDir, "master")) {
+    return "master";
+  }
+  return resolveMainRepoBranch(commonGitDir);
+}
+
+function hasBranchCommitActivity(commonGitDir, branchName) {
+  const logFile = path.join(commonGitDir, "logs", "refs", "heads", branchName);
+  try {
+    if (!fs.existsSync(logFile) || !fs.statSync(logFile).isFile()) {
+      return false;
+    }
+    const content = fs.readFileSync(logFile, "utf8").trim();
+    if (!content) return false;
+    return /\t(?:commit|merge|rebase|cherry-pick|pull)\b/m.test(content);
+  } catch {
+    return false;
+  }
+}
+
+function isWorktreeCleanAndIdle(wtPath, locked, isCoolingDownFn) {
+  if (locked || !wtPath || !fs.existsSync(wtPath) || hasActiveGitLock(wtPath)) {
+    return false;
+  }
+  if (isCoolingDownFn(wtPath)) {
+    return false;
+  }
+  try {
+    const statusProc = spawnSync(
+      "git",
+      ["status", "--porcelain", "--untracked-files=normal"],
+      {
+        cwd: wtPath,
+        encoding: "utf8",
+        timeout: 5000,
+      }
+    );
+    return statusProc.status === 0 && statusProc.stdout.trim() === "";
+  } catch {
+    return false;
+  }
+}
+
 function gitBranchExists(commonGitDir, branchName) {
   if (!branchName || typeof branchName !== "string") {
     return false;
@@ -671,7 +730,12 @@ export function ensureWorktreeSharedPaths(targetRoot = process.cwd()) {
  */
 export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
   if (process.env.HARNESS_CLEAN_WORKTREES_ACTIVE === "1") {
-    return { prunedWorktrees: [], removedGhostDirs: [], refreshedServerInfo: false };
+    return {
+      prunedWorktrees: [],
+      removedGhostDirs: [],
+      prunedBranches: [],
+      refreshedServerInfo: false,
+    };
   }
   const dryRun = Boolean(options.dryRun);
   const quiet = Boolean(options.quiet);
@@ -679,12 +743,22 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
 
   const commonGitDir = resolveGitCommonDir(targetRoot);
   if (!commonGitDir) {
-    return { prunedWorktrees: [], removedGhostDirs: [], refreshedServerInfo: false };
+    return {
+      prunedWorktrees: [],
+      removedGhostDirs: [],
+      prunedBranches: [],
+      refreshedServerInfo: false,
+    };
   }
 
   // PROP-08: Abort destructive worktree GC if the common .git directory currently holds an active lock
   if (hasActiveGitLock(commonGitDir)) {
-    return { prunedWorktrees: [], removedGhostDirs: [], refreshedServerInfo: false };
+    return {
+      prunedWorktrees: [],
+      removedGhostDirs: [],
+      prunedBranches: [],
+      refreshedServerInfo: false,
+    };
   }
 
   const mainRepoRoot = path.dirname(commonGitDir);
@@ -725,6 +799,7 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
   const worktreesMetaDir = path.join(commonGitDir, "worktrees");
   const prunedWorktrees = [];
   const removedGhostDirs = [];
+  const prunedBranches = [];
   const activeWorktreePaths = new Set([path.resolve(mainRepoRoot), mainRepoReal]);
   let hasCoolingWorktreeMeta = false;
 
@@ -737,6 +812,11 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
     const resolved = path.resolve(dirPath);
     if (!removedGhostDirs.includes(resolved)) {
       removedGhostDirs.push(resolved);
+    }
+  };
+  const recordPrunedBranch = (branchName) => {
+    if (branchName && !prunedBranches.includes(branchName)) {
+      prunedBranches.push(branchName);
     }
   };
 
@@ -853,8 +933,176 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
     }
   }
 
-  // Reconcile stale worktree entries across all declaratively configured Agent project registries
+  // Reconcile and prune local branches (and clean linked worktrees) whose upstream is [gone] or merged into primary branch
   const mainBranch = resolveMainRepoBranch(commonGitDir);
+  const primaryBranch = resolvePrimaryBranch(commonGitDir);
+  const protectedBranches = new Set(["main", "master"]);
+  if (mainBranch) protectedBranches.add(mainBranch);
+  if (primaryBranch) protectedBranches.add(primaryBranch);
+
+  const linkedWorktreeByBranch = new Map();
+  try {
+    const wtListProc = spawnSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: mainRepoRoot,
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    if (wtListProc.status === 0 && wtListProc.stdout) {
+      const blocks = wtListProc.stdout.trim().split(/\n\n+/);
+      for (const block of blocks) {
+        let wtPath = null;
+        let branchName = null;
+        let locked = false;
+        for (const line of block.split("\n")) {
+          if (line.startsWith("worktree ")) {
+            wtPath = line.slice("worktree ".length).trim();
+          } else if (line.startsWith("branch refs/heads/")) {
+            branchName = line.slice("branch refs/heads/".length).trim();
+          } else if (line === "locked" || line.startsWith("locked ")) {
+            locked = true;
+          }
+        }
+        if (!wtPath || !branchName) continue;
+        const resolvedWt = path.resolve(wtPath);
+        const realWt = safeRealpath(wtPath);
+        if (resolvedWt === path.resolve(mainRepoRoot) || realWt === mainRepoReal) {
+          protectedBranches.add(branchName);
+        } else {
+          linkedWorktreeByBranch.set(branchName, { wtPath: resolvedWt, locked });
+        }
+      }
+    }
+  } catch {
+    // Ignore git worktree list errors
+  }
+
+  try {
+    const mergedIntoPrimary = new Set();
+    if (primaryBranch && gitBranchExists(commonGitDir, primaryBranch)) {
+      const mergedProc = spawnSync(
+        "git",
+        [
+          "for-each-ref",
+          `--merged=refs/heads/${primaryBranch}`,
+          "--format=%(refname:short)",
+          "refs/heads",
+        ],
+        {
+          cwd: mainRepoRoot,
+          encoding: "utf8",
+          timeout: 5000,
+        }
+      );
+      if (mergedProc.status === 0 && mergedProc.stdout) {
+        for (const line of mergedProc.stdout.split("\n")) {
+          const b = line.trim();
+          if (b) mergedIntoPrimary.add(b);
+        }
+      }
+    }
+
+    const refsProc = spawnSync(
+      "git",
+      [
+        "for-each-ref",
+        "--format=%(refname:short)\t%(objectname)\t%(upstream:short)\t%(upstream:track)",
+        "refs/heads",
+      ],
+      {
+        cwd: mainRepoRoot,
+        encoding: "utf8",
+        timeout: 5000,
+      }
+    );
+
+    if (refsProc.status === 0 && refsProc.stdout) {
+      const branchRecords = [];
+      let primaryBranchSha = null;
+      for (const rawLine of refsProc.stdout.split("\n")) {
+        if (!rawLine.trim()) continue;
+        const [branchName = "", sha = "", upstreamShort = "", upstreamTrack = ""] =
+          rawLine.split("\t");
+        if (!branchName) continue;
+        if (branchName === primaryBranch) {
+          primaryBranchSha = sha;
+        }
+        branchRecords.push({ branchName, sha, upstreamShort, upstreamTrack });
+      }
+
+      for (const { branchName, sha, upstreamShort, upstreamTrack } of branchRecords) {
+        if (protectedBranches.has(branchName)) continue;
+
+        const isUpstreamGone = upstreamTrack.includes("[gone]");
+        const isMerged =
+          mergedIntoPrimary.has(branchName) &&
+          Boolean(primaryBranchSha) &&
+          (Boolean(upstreamShort) ||
+            (sha !== primaryBranchSha && hasBranchCommitActivity(commonGitDir, branchName)));
+
+        const wtInfo = linkedWorktreeByBranch.get(branchName);
+        if (wtInfo) {
+          if (!isUpstreamGone) {
+            continue;
+          }
+          if (!isWorktreeCleanAndIdle(wtInfo.wtPath, wtInfo.locked, isCoolingDown)) {
+            continue;
+          }
+          if (!dryRun) {
+            const rmWt = spawnSync("git", ["worktree", "remove", wtInfo.wtPath], {
+              cwd: mainRepoRoot,
+              encoding: "utf8",
+              timeout: 5000,
+              env: { ...process.env, HARNESS_CLEAN_WORKTREES_ACTIVE: "1" },
+            });
+            if (rmWt.status !== 0) {
+              continue;
+            }
+          }
+          activeWorktreePaths.delete(path.resolve(wtInfo.wtPath));
+          activeWorktreePaths.delete(safeRealpath(wtInfo.wtPath));
+          recordPruned(path.basename(wtInfo.wtPath));
+          recordGhostDir(wtInfo.wtPath);
+          removeEmptyParentContainer(wtInfo.wtPath, mainRepoRoot, dryRun);
+
+          if (!dryRun) {
+            const delBr = spawnSync("git", ["branch", "-D", branchName], {
+              cwd: mainRepoRoot,
+              encoding: "utf8",
+              timeout: 5000,
+              env: { ...process.env, HARNESS_CLEAN_WORKTREES_ACTIVE: "1" },
+            });
+            if (delBr.status === 0) {
+              recordPrunedBranch(branchName);
+            }
+          } else {
+            recordPrunedBranch(branchName);
+          }
+          continue;
+        }
+
+        if (isUpstreamGone || isMerged) {
+          const deleteFlag = isUpstreamGone ? "-D" : "-d";
+          if (!dryRun) {
+            const delBr = spawnSync("git", ["branch", deleteFlag, branchName], {
+              cwd: mainRepoRoot,
+              encoding: "utf8",
+              timeout: 5000,
+              env: { ...process.env, HARNESS_CLEAN_WORKTREES_ACTIVE: "1" },
+            });
+            if (delBr.status === 0) {
+              recordPrunedBranch(branchName);
+            }
+          } else {
+            recordPrunedBranch(branchName);
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore transient git branch inspection errors
+  }
+
+  // Reconcile stale worktree entries across all declaratively configured Agent project registries
   for (const projectsConfigDir of projectRegistryDirs) {
     if (!fs.existsSync(projectsConfigDir) || !fs.statSync(projectsConfigDir).isDirectory()) {
       continue;
@@ -1013,14 +1261,20 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
     pruneEmptySubdirs(path.join(commonGitDir, "logs", "refs", "heads"));
   }
 
-  if (!silent && (prunedWorktrees.length > 0 || removedGhostDirs.length > 0 || !quiet)) {
+  if (
+    !silent &&
+    (prunedWorktrees.length > 0 ||
+      removedGhostDirs.length > 0 ||
+      prunedBranches.length > 0 ||
+      !quiet)
+  ) {
     const prefix = dryRun ? "[harness clean --worktrees --dry-run]" : "[harness clean --worktrees]";
     console.log(
-      `${prefix} pruned ${prunedWorktrees.length} stale worktree metadata item(s), removed ${removedGhostDirs.length} ghost directory(ies)${
+      `${prefix} pruned ${prunedWorktrees.length} stale worktree metadata item(s), removed ${removedGhostDirs.length} ghost directory(ies), pruned ${prunedBranches.length} merged/gone branch(es)${
         refreshedServerInfo ? ", refreshed .git/info/refs" : ""
       }.`
     );
   }
 
-  return { prunedWorktrees, removedGhostDirs, refreshedServerInfo };
+  return { prunedWorktrees, removedGhostDirs, prunedBranches, refreshedServerInfo };
 }

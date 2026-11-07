@@ -123,6 +123,11 @@ export function runInit(targetRoot = process.cwd(), options = {}) {
   for (const line of actions) {
     console.log(`  ${line}`);
   }
+
+  const hasGit = Boolean(resolveGitCommonDir(targetRoot));
+  if (hasGit) {
+    installHooks(targetRoot, { git: true, agents: true });
+  }
 }
 
 /**

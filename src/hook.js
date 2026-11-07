@@ -66,6 +66,87 @@ export function resolveGitHooksDir(targetRoot = process.cwd()) {
   return commonGitDir ? path.join(commonGitDir, "hooks") : null;
 }
 
+function parseGitHubRepoSlug(remoteUrl) {
+  if (typeof remoteUrl !== "string" || !remoteUrl.trim()) {
+    return null;
+  }
+  const match = remoteUrl
+    .trim()
+    .match(/github\.com[:/]([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i);
+  if (!match || !match[1] || !match[2]) {
+    return null;
+  }
+  return `${match[1]}/${match[2]}`;
+}
+
+function syncGitHubDeleteBranchOnMerge(targetRoot, actions) {
+  const gitEnv = {
+    ...process.env,
+    GIT_CEILING_DIRECTORIES: path.dirname(path.resolve(targetRoot)),
+  };
+  const remoteProc = spawnSync("git", ["config", "--get", "remote.origin.url"], {
+    cwd: targetRoot,
+    encoding: "utf8",
+    timeout: 5000,
+    env: gitEnv,
+  });
+  const remoteUrl = remoteProc.status === 0 && remoteProc.stdout ? remoteProc.stdout.trim() : "";
+  const repoSlug = parseGitHubRepoSlug(remoteUrl);
+
+  if (!repoSlug) {
+    actions.push(
+      "tip       (optional) To auto-delete merged PR branches on GitHub, run: gh repo edit <owner>/<repo> --delete-branch-on-merge"
+    );
+    return;
+  }
+
+  const cachedProc = spawnSync(
+    "git",
+    ["config", "--local", "--get", "harness.ghDeleteBranchOnMerge"],
+    {
+      cwd: targetRoot,
+      encoding: "utf8",
+      timeout: 5000,
+      env: gitEnv,
+    }
+  );
+  if (cachedProc.status === 0 && cachedProc.stdout && cachedProc.stdout.trim() === repoSlug) {
+    actions.push(`ok        GitHub deleteBranchOnMerge (${repoSlug})`);
+    return;
+  }
+
+  const ghProc = spawnSync("gh", ["repo", "edit", repoSlug, "--delete-branch-on-merge"], {
+    cwd: targetRoot,
+    encoding: "utf8",
+    timeout: 10000,
+  });
+
+  if (ghProc.status === 0) {
+    spawnSync("git", ["config", "--local", "harness.ghDeleteBranchOnMerge", repoSlug], {
+      cwd: targetRoot,
+      encoding: "utf8",
+      timeout: 5000,
+      env: gitEnv,
+    });
+    actions.push(`enabled   GitHub deleteBranchOnMerge (${repoSlug})`);
+    return;
+  }
+
+  const errDetail = (
+    ghProc.stderr ||
+    ghProc.stdout ||
+    (ghProc.error && ghProc.error.message) ||
+    ""
+  )
+    .trim()
+    .split(/\r?\n/)[0];
+  actions.push(
+    `tip       (optional) Could not auto-enable GitHub deleteBranchOnMerge (${repoSlug}${
+      errDetail ? `: ${errDetail}` : ""
+    }); to enable manually, run: gh repo edit ${repoSlug} --delete-branch-on-merge`
+  );
+}
+
 /**
  * Install Git pre-commit & reference-transaction hooks and/or .agents/hooks.json Stop hook.
  */
@@ -95,11 +176,22 @@ export function installHooks(targetRoot = process.cwd(), options = {}) {
         console.error(error.message);
         return 1;
       }
-      for (const { name, file, exists, existing, content } of updates) {
+      for (const { file, exists, existing, content } of updates) {
         if (!exists || content !== existing) fs.writeFileSync(file, content, "utf8");
         fs.chmodSync(file, 0o755);
         actions.push(`${!exists ? "installed" : content === existing ? "ok       " : "updated  "} ${file}`);
       }
+      spawnSync("git", ["config", "--local", "fetch.prune", "true"], {
+        cwd: targetRoot,
+        encoding: "utf8",
+        timeout: 5000,
+        env: {
+          ...process.env,
+          GIT_CEILING_DIRECTORIES: path.dirname(path.resolve(targetRoot)),
+        },
+      });
+      actions.push("configured git config --local fetch.prune=true");
+      syncGitHubDeleteBranchOnMerge(targetRoot, actions);
     } else if (options.git) {
       console.error("No .git directory found in current workspace. Run `git init` first.");
       return 1;

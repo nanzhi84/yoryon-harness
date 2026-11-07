@@ -19,6 +19,7 @@
 - 修复 `src/doctor.js` 巡检误扫 Python 虚拟环境与临时协作目录的问题：`IGNORED_WALK_DIRS` 新增忽略 `.venv`、`venv`、`teamwork` 及缓存目录。
 
 ### Added
+- 新增 PR 合并后远端与本地分支/Worktree 闭环自动清理：`harness init`、`harness sync` 与 `harness hook install` 自动开启本地 `git config --local fetch.prune true`，并自动检测 `origin` GitHub 远端调用 `gh repo edit <owner>/<repo> --delete-branch-on-merge` 开启云端自动删分支（缓存至 `harness.ghDeleteBranchOnMerge`，未绑定远端或 `gh` 失败时打印提醒且不阻塞本地命令）；`src/clean.js`（`cleanWorktrees`）自动识别并删除已合入主干的本地分支及上游远端引用已消失（`[gone]`，含 Squash / Rebase Merge 场景）的本地分支，对绑定了 `[gone]` 分支且工作区干净的子 worktree 自动卸载目录并清理分支，对存在未提交改动的子 worktree 严格保留。
 - 落地跨三仓实证调研（`docs/reference/harness_recurring_issues_survey_zh.md`）全部 12 项通用 Harness 抽象下沉提案（PROP-01 ~ PROP-12）：
   - `DIR001`（PROP-09）：仓库根目录与 `docs/` 目录防污染白名单守卫，拦截 `docs/` 下非标子目录及根目录散落截图/二进制文件（支持 `.agents/harness.json` `rootAllowlist` 扩展）。
   - `TST003`（PROP-01）：基于 `.agents/harness.json` `protectedPaths` 的只读裁判与验收基线目录锁定守卫。
