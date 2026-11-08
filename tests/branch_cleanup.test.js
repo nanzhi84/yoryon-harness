@@ -142,9 +142,40 @@ describe("TestBranchCleanup", () => {
       runCmd(localDir, "git", ["commit", "-q", "--no-verify", "-m", "wip: local work"], env);
       runCmd(localDir, "git", ["checkout", "-q", "main"], env);
 
-      // Simulate GitHub auto-deleting both PR branches on remote after merge
+      // 4. Closed unmerged PR branch (pushed to origin, deleted on origin without merging into main)
+      runCmd(localDir, "git", ["checkout", "-q", "-b", "feat/closed-unmerged-pr"], env);
+      fs.writeFileSync(path.join(localDir, "closed-pr.txt"), "unmerged closed pr work\n", "utf8");
+      runCmd(localDir, "git", ["add", "closed-pr.txt"], env);
+      runCmd(localDir, "git", ["commit", "-q", "--no-verify", "-m", "feat: closed unmerged pr"], env);
+      runCmd(localDir, "git", ["push", "-q", "-u", "origin", "feat/closed-unmerged-pr"], env);
+      runCmd(localDir, "git", ["checkout", "-q", "main"], env);
+
+      // 5. Squash-merged PR branch that ALSO has an additional unpushed local commit not in main
+      runCmd(localDir, "git", ["checkout", "-q", "-b", "feat/squash-with-unpushed"], env);
+      fs.writeFileSync(path.join(localDir, "squash-extra.txt"), "squash v1 merged\n", "utf8");
+      runCmd(localDir, "git", ["add", "squash-extra.txt"], env);
+      runCmd(localDir, "git", ["commit", "-q", "--no-verify", "-m", "feat: squash v1"], env);
+      runCmd(localDir, "git", ["push", "-q", "-u", "origin", "feat/squash-with-unpushed"], env);
+
+      // Squash-merge v1 into main on origin
+      runCmd(localDir, "git", ["checkout", "-q", "main"], env);
+      fs.writeFileSync(path.join(localDir, "squash-extra.txt"), "squash v1 merged\n", "utf8");
+      runCmd(localDir, "git", ["add", "squash-extra.txt"], env);
+      runCmd(localDir, "git", ["commit", "-q", "--no-verify", "-m", "feat: squash v1 (#5)"], env);
+      runCmd(localDir, "git", ["push", "-q", "origin", "main"], env);
+
+      // Add unpushed v2 commit on feat/squash-with-unpushed
+      runCmd(localDir, "git", ["checkout", "-q", "feat/squash-with-unpushed"], env);
+      fs.writeFileSync(path.join(localDir, "squash-extra.txt"), "squash v1 merged\nunpushed v2 work\n", "utf8");
+      runCmd(localDir, "git", ["add", "squash-extra.txt"], env);
+      runCmd(localDir, "git", ["commit", "-q", "--no-verify", "-m", "feat: unpushed v2"], env);
+      runCmd(localDir, "git", ["checkout", "-q", "main"], env);
+
+      // Simulate GitHub deleting remote branches (merged PRs and closed unmerged PR)
       runCmd(sandbox, "git", [`--git-dir=${remoteDir}`, "branch", "-D", "feat/merge-pr"], env);
       runCmd(sandbox, "git", [`--git-dir=${remoteDir}`, "branch", "-D", "feat/squash-pr"], env);
+      runCmd(sandbox, "git", [`--git-dir=${remoteDir}`, "branch", "-D", "feat/closed-unmerged-pr"], env);
+      runCmd(sandbox, "git", [`--git-dir=${remoteDir}`, "branch", "-D", "feat/squash-with-unpushed"], env);
 
       // Run git fetch origin in local (should auto-prune remote refs and trigger reference-transaction cleanup)
       runCmd(localDir, "git", ["fetch", "-q", "origin"], env);
@@ -160,6 +191,16 @@ describe("TestBranchCleanup", () => {
         "Remote-tracking ref origin/feat/squash-pr should be pruned on git fetch"
       );
       assert.equal(
+        remoteTrackingRefExists(localDir, "origin/feat/closed-unmerged-pr", env),
+        false,
+        "Remote-tracking ref origin/feat/closed-unmerged-pr should be pruned on git fetch"
+      );
+      assert.equal(
+        remoteTrackingRefExists(localDir, "origin/feat/squash-with-unpushed", env),
+        false,
+        "Remote-tracking ref origin/feat/squash-with-unpushed should be pruned on git fetch"
+      );
+      assert.equal(
         branchExists(localDir, "feat/merge-pr", env),
         false,
         "Local merged branch feat/merge-pr should be automatically deleted after fetch"
@@ -168,6 +209,16 @@ describe("TestBranchCleanup", () => {
         branchExists(localDir, "feat/squash-pr", env),
         false,
         "Local squash-merged branch feat/squash-pr with [gone] upstream should be automatically deleted after fetch"
+      );
+      assert.equal(
+        branchExists(localDir, "feat/closed-unmerged-pr", env),
+        true,
+        "Local branch feat/closed-unmerged-pr whose remote was deleted without merging into main MUST remain intact"
+      );
+      assert.equal(
+        branchExists(localDir, "feat/squash-with-unpushed", env),
+        true,
+        "Local branch feat/squash-with-unpushed with unpushed commits not in main MUST remain intact"
       );
       assert.equal(
         branchExists(localDir, "main", env),
@@ -192,6 +243,7 @@ describe("TestBranchCleanup", () => {
       const remoteDir = path.join(sandbox, "remote.git");
       const localDir = path.join(sandbox, "local");
       const wtClean = path.join(sandbox, "wt-clean");
+      const wtCleanUnmerged = path.join(sandbox, "wt-clean-unmerged");
       const wtDirty = path.join(sandbox, "wt-dirty");
 
       runCmd(sandbox, "git", ["init", "-q", "--bare", "-b", "main", remoteDir], env);
@@ -207,24 +259,40 @@ describe("TestBranchCleanup", () => {
 
       runCmd(localDir, process.execPath, [CLI_BIN, "hook", "install", "--git"], env);
 
-      // Clean linked worktree whose upstream branch will be deleted on remote
+      // 1. Clean linked worktree whose changes ARE squash-merged into main and upstream branch is deleted on remote
       runCmd(localDir, "git", ["worktree", "add", "-q", "-b", "feat/wt-clean-pr", wtClean, "main"], env);
       fs.writeFileSync(path.join(wtClean, "clean.txt"), "clean worktree change\n", "utf8");
       runCmd(wtClean, "git", ["add", "clean.txt"], env);
       runCmd(wtClean, "git", ["commit", "-q", "--no-verify", "-m", "feat: clean wt"], env);
       runCmd(wtClean, "git", ["push", "-q", "-u", "origin", "feat/wt-clean-pr"], env);
 
-      // Dirty linked worktree whose upstream branch will also be deleted on remote
+      // Squash-merge feat/wt-clean-pr into main and push to origin
+      fs.writeFileSync(path.join(localDir, "clean.txt"), "clean worktree change\n", "utf8");
+      runCmd(localDir, "git", ["add", "clean.txt"], env);
+      runCmd(localDir, "git", ["commit", "-q", "--no-verify", "-m", "feat: clean wt (#1)"], env);
+      runCmd(localDir, "git", ["push", "-q", "origin", "main"], env);
+
+      // 2. Clean linked worktree whose upstream branch is deleted on remote WITHOUT merging into main
+      runCmd(localDir, "git", ["worktree", "add", "-q", "-b", "feat/wt-clean-unmerged", wtCleanUnmerged, "main"], env);
+      fs.writeFileSync(path.join(wtCleanUnmerged, "unmerged-wt.txt"), "unmerged worktree change\n", "utf8");
+      runCmd(wtCleanUnmerged, "git", ["add", "unmerged-wt.txt"], env);
+      runCmd(wtCleanUnmerged, "git", ["commit", "-q", "--no-verify", "-m", "feat: clean unmerged wt"], env);
+      runCmd(wtCleanUnmerged, "git", ["push", "-q", "-u", "origin", "feat/wt-clean-unmerged"], env);
+
+      // 3. Dirty linked worktree whose committed changes are in main and upstream is deleted on remote, but has uncommitted changes
       runCmd(localDir, "git", ["worktree", "add", "-q", "-b", "feat/wt-dirty-pr", wtDirty, "main"], env);
       fs.writeFileSync(path.join(wtDirty, "committed.txt"), "committed change\n", "utf8");
       runCmd(wtDirty, "git", ["add", "committed.txt"], env);
       runCmd(wtDirty, "git", ["commit", "-q", "--no-verify", "-m", "feat: dirty wt"], env);
       runCmd(wtDirty, "git", ["push", "-q", "-u", "origin", "feat/wt-dirty-pr"], env);
+      runCmd(localDir, "git", ["merge", "-q", "--no-ff", "--no-verify", "feat/wt-dirty-pr", "-m", "Merge feat/wt-dirty-pr"], env);
+      runCmd(localDir, "git", ["push", "-q", "origin", "main"], env);
       const dirtyFile = path.join(wtDirty, "dirty.txt");
       fs.writeFileSync(dirtyFile, "uncommitted local changes\n", "utf8");
 
-      // Delete both PR branches on bare remote
+      // Delete all three PR branches on bare remote
       runCmd(sandbox, "git", [`--git-dir=${remoteDir}`, "branch", "-D", "feat/wt-clean-pr"], env);
+      runCmd(sandbox, "git", [`--git-dir=${remoteDir}`, "branch", "-D", "feat/wt-clean-unmerged"], env);
       runCmd(sandbox, "git", [`--git-dir=${remoteDir}`, "branch", "-D", "feat/wt-dirty-pr"], env);
 
       // Fetch in local repo
@@ -233,12 +301,22 @@ describe("TestBranchCleanup", () => {
       assert.equal(
         fs.existsSync(wtClean),
         false,
-        "Clean worktree wtClean with [gone] upstream should be removed"
+        "Clean merged/squash-merged worktree wtClean with [gone] upstream should be removed"
       );
       assert.equal(
         branchExists(localDir, "feat/wt-clean-pr", env),
         false,
         "Branch feat/wt-clean-pr of removed clean worktree should be deleted"
+      );
+      assert.equal(
+        fs.existsSync(wtCleanUnmerged),
+        true,
+        "Clean worktree wtCleanUnmerged whose changes are NOT in main MUST be preserved even when upstream is [gone]"
+      );
+      assert.equal(
+        branchExists(localDir, "feat/wt-clean-unmerged", env),
+        true,
+        "Branch feat/wt-clean-unmerged whose changes are NOT in main MUST be preserved even when upstream is [gone]"
       );
       assert.equal(
         fs.existsSync(wtDirty),

@@ -72,5 +72,5 @@ sequenceDiagram
    - `harness hook run --agent` 仅在正常回合结束（`terminationReason == "NO_TOOL_CALL"`）时执行拦截；遇到 `MTX001` 违规时自动从 `HEAD` 还原不可变列单元格并注入告警；支持 `--staged` 增量检查 Python `ruff format --check` 与 JS/TS `prettier --check`。
 4. **隔离沙盒运行与回执落盘（[`src/run.js`](../../src/run.js)）**：
    - `harness run` 在 `work/<run-id>/` 与 `artifacts/<run-id>/` 隔离目录中执行验收命令并生成 `receipt.json` 审计回执。
-5. **Worktree 物理目录回收边界与并发活跃度守卫（[`src/clean.js`](../../src/clean.js)）**：
-   - 回收失效 worktree 前强制检查 `.git/index.lock` 等锁文件与 mtime 冷却窗口，且仅允许删除严格位于 `worktreeContainerDirs` 容器内部且无有效 `.git` 链接的物理目录。
+5. **Worktree 物理目录回收边界、分支合并校验与并发活跃度守卫（[`src/clean.js`](../../src/clean.js)）**：
+   - 回收失效 worktree 前强制检查 `.git/index.lock` 等锁文件与 mtime 冷却窗口，且仅允许删除严格位于 `worktreeContainerDirs` 容器内部且无有效 `.git` 链接的物理目录；对上游远端已删除（`[gone]`）的本地分支与关联干净 worktree，强制通过 `git for-each-ref --merged` 或 `git merge-tree --write-tree` 校验分支改动已合入主分支后才允许移除，防止未合并本地提交丢失引用。

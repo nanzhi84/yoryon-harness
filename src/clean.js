@@ -430,6 +430,68 @@ function isWorktreeCleanAndIdle(wtPath, locked, isCoolingDownFn) {
   }
 }
 
+function resolvePrimaryTargetTrees(mainRepoRoot, primaryBranch) {
+  if (!primaryBranch) return [];
+  const candidateRefs = [
+    `refs/heads/${primaryBranch}`,
+    `refs/remotes/origin/${primaryBranch}`,
+  ];
+  const targets = [];
+  const seenTrees = new Set();
+  for (const ref of candidateRefs) {
+    try {
+      const proc = spawnSync("git", ["rev-parse", "--verify", "--quiet", `${ref}^{tree}`], {
+        cwd: mainRepoRoot,
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      if (proc.status === 0 && proc.stdout) {
+        const treeSha = proc.stdout.trim();
+        if (treeSha && !seenTrees.has(`${ref}:${treeSha}`)) {
+          seenTrees.add(`${ref}:${treeSha}`);
+          targets.push({ ref, treeSha });
+        }
+      }
+    } catch {
+      // Ignore unresolvable candidate ref
+    }
+  }
+  return targets;
+}
+
+function isBranchIntegratedIntoPrimary(
+  mainRepoRoot,
+  branchName,
+  mergedIntoPrimary,
+  primaryTargets
+) {
+  if (mergedIntoPrimary.has(branchName)) {
+    return true;
+  }
+  for (const target of primaryTargets) {
+    try {
+      const mergeTreeProc = spawnSync(
+        "git",
+        ["merge-tree", "--write-tree", target.ref, `refs/heads/${branchName}`],
+        {
+          cwd: mainRepoRoot,
+          encoding: "utf8",
+          timeout: 5000,
+        }
+      );
+      if (mergeTreeProc.status === 0 && mergeTreeProc.stdout) {
+        const mergedTreeSha = mergeTreeProc.stdout.trim().split("\n")[0].trim();
+        if (mergedTreeSha && mergedTreeSha === target.treeSha) {
+          return true;
+        }
+      }
+    } catch {
+      // Ignore merge-tree inspection errors
+    }
+  }
+  return false;
+}
+
 function gitBranchExists(commonGitDir, branchName) {
   if (!branchName || typeof branchName !== "string") {
     return false;
@@ -1015,6 +1077,8 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
       }
     );
 
+    const primaryTargets = resolvePrimaryTargetTrees(mainRepoRoot, primaryBranch);
+
     if (refsProc.status === 0 && refsProc.stdout) {
       const branchRecords = [];
       let primaryBranchSha = null;
@@ -1033,6 +1097,14 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
         if (protectedBranches.has(branchName)) continue;
 
         const isUpstreamGone = upstreamTrack.includes("[gone]");
+        const isIntegratedWhenGone =
+          isUpstreamGone &&
+          isBranchIntegratedIntoPrimary(
+            mainRepoRoot,
+            branchName,
+            mergedIntoPrimary,
+            primaryTargets
+          );
         const isMerged =
           mergedIntoPrimary.has(branchName) &&
           Boolean(primaryBranchSha) &&
@@ -1041,7 +1113,7 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
 
         const wtInfo = linkedWorktreeByBranch.get(branchName);
         if (wtInfo) {
-          if (!isUpstreamGone) {
+          if (!isIntegratedWhenGone) {
             continue;
           }
           if (!isWorktreeCleanAndIdle(wtInfo.wtPath, wtInfo.locked, isCoolingDown)) {
@@ -1080,8 +1152,8 @@ export function cleanWorktrees(targetRoot = process.cwd(), options = {}) {
           continue;
         }
 
-        if (isUpstreamGone || isMerged) {
-          const deleteFlag = isUpstreamGone ? "-D" : "-d";
+        if (isIntegratedWhenGone || isMerged) {
+          const deleteFlag = isIntegratedWhenGone ? "-D" : "-d";
           if (!dryRun) {
             const delBr = spawnSync("git", ["branch", deleteFlag, branchName], {
               cwd: mainRepoRoot,
