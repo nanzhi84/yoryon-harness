@@ -68,8 +68,8 @@ sequenceDiagram
    - `SPC001`、`ADR001` / `ADR002`、`REF001`、`LNK001` / `LNK002`：强制保证 Spec/ADR 生命周期位置、参考资料索引登记与本地链接/锚点精确匹配。
    - `TST001` ~ `TST004`：`tests/` 下严禁阶段/序号命名测试文件，Python（`class Test<Subject>:` + `def test_<scenario>_<expected>()`）与 TS/JS（`describe("Test<Subject>", ...)` + `it("test_<scenario>_<expected>", ...)`）对称强制层级与两段式命名；严禁业务 Mock（`TST002`）；锁定 `.agents/harness.json` `protectedPaths` 只读裁判基线（`TST003`）；强制测试内 `subprocess.run` / `spawnSync` / `execSync` 显式传入 `timeout`（`TST004`）。
    - `MTX001`、`AST001` / `AST002`：按 `.agents/harness.json` 锁定 CSV/TSV `immutableColumns` 不可篡改，以及声明式分层依赖方向与核心目录禁用字面量正则。
-3. **Agent Stop 钩子、矩阵自动还原与增量类型/格式门禁（[`src/hook.js`](../../src/hook.js)）**：
-   - `harness hook run --agent` 仅在正常回合结束（`terminationReason == "NO_TOOL_CALL"`）时执行拦截；遇到 `MTX001` 违规时自动从 `HEAD` 还原不可变列单元格并注入告警；支持 `--staged` 增量检查 Python `ruff format --check` 与 JS/TS `prettier --check`。
+3. **Agent Stop 钩子、只读回合放行、矩阵自动还原与增量类型/格式门禁（[`src/hook.js`](../../src/hook.js) & [`src/hook-tools.js`](../../src/hook-tools.js)）**：
+   - `harness hook run --agent` 仅在正常回合结束（`terminationReason == "NO_TOOL_CALL"`）时执行拦截；若通过 `stdin` 传入的 `transcriptPath`（或 `toolCall`）判定当前回合仅包含只读操作（无工具调用、仅调用只读工具/只读 Shell 命令、或修改类工具调用均以 `ERROR` 终止），直接输出 `{"decision":"stop"}` 放行，跳过沙盒清理与静态检查；遇到 `MTX001` 违规时自动从 `HEAD` 还原不可变列单元格并注入告警；支持 `--staged` 增量检查 Python `ruff format --check` 与 JS/TS `prettier --check`。
 4. **隔离沙盒运行与回执落盘（[`src/run.js`](../../src/run.js)）**：
    - `harness run` 在 `work/<run-id>/` 与 `artifacts/<run-id>/` 隔离目录中执行验收命令并生成 `receipt.json` 审计回执。
 5. **Worktree 物理目录回收边界、分支合并校验与并发活跃度守卫（[`src/clean.js`](../../src/clean.js)）**：

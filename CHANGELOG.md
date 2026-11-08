@@ -11,6 +11,7 @@
 - 默认根目录白名单收紧为 10 个通用工作区目录；框架、编辑器和业务目录由各项目 `.agents/harness.json` 的 `rootAllowlist` 显式声明。根目录权限不再复用递归内容扫描的依赖/构建排除名单，保留 Git 忽略及已声明共享路径语义。
 
 ### Fixed
+- 修复 `harness hook run --agent` 在纯只读回合（纯问答、仅调用 `read_file`/`grep_search` 等只读工具、仅执行 `git status`/`git diff`/`ls`/`cat`/`harness doctor` 等只读 Shell 命令、或修改类调用被拒绝报错）结束时仍无条件触发沙盒清理与全套静态检查的问题：`src/hook-tools.js` 新增 `isReadOnlyShellCommand`、`isReadOnlyToolCall` 与 `isReadOnlyAgentTurn`（解析 `stdin` 的 `transcriptPath` 最新 `USER_INPUT` 后的工具调用记录及 `transcript_full.jsonl` 回退），只读回合直接返回 `{"decision":"stop"}` 放行。
 - 修复 `src/clean.js` 对远端跟踪分支显示为 `[gone]` 的本地分支与干净子 worktree 未校验代码是否已合入主分支即强制删除的风险：新增 `git merge-tree --write-tree` 模拟合并等价性校验（结合 `git for-each-ref --merged` 祖先检查），仅当分支净改动已完整包含于主分支（含普通 Merge、Rebase Merge 与多提交 Squash Merge）时才移除干净子 worktree 并执行 `git branch -D`，对远端分支未合并直接删除或本地尚有未推送新提交的分支严格保留。
 - 从默认根目录白名单移除 `scripts/`，统一由 `DIR001` 检查；保留项目显式 `rootAllowlist` 扩展能力。
 - 修复 hook 升级截断用户追加逻辑：为受管片段增加结束标记，识别已发布旧脚本并保留片段外原文；未知旧片段拒绝覆盖。

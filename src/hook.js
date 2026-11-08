@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { checkStaticTypes } from "./hook-checks.js";
 import { updateHookScript } from "./hook-script.js";
+import { isReadOnlyAgentTurn } from "./hook-tools.js";
 import { checkWorkspace, restoreProtectedMatrices } from "./doctor.js";
 import {
   cleanSandboxes,
@@ -273,6 +274,12 @@ export function runHook(
     );
     // Only block stop on normal turn completion; never trap user cancellations or hard limits.
     if (terminationReason !== "NO_TOOL_CALL") {
+      console.log(JSON.stringify({ decision: "stop" }));
+      return 0;
+    }
+
+    // Skip hook checks and cleanup when the current turn only performed read-only operations.
+    if (isReadOnlyAgentTurn(payload)) {
       console.log(JSON.stringify({ decision: "stop" }));
       return 0;
     }
