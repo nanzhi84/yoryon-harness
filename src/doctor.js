@@ -1966,6 +1966,37 @@ export function checkWorkspace(targetRoot = process.cwd()) {
       const matchedPattern = protectedPaths.find((pat) => matchGlob(changedFile, pat));
       if (!matchedPattern) continue;
 
+      if (changedFile === ".agents/hooks.json") {
+        try {
+          const hooksPath = path.join(targetRoot, ".agents", "hooks.json");
+          if (fs.existsSync(hooksPath)) {
+            const parsedHooks = JSON.parse(fs.readFileSync(hooksPath, "utf8"));
+            const guard = parsedHooks?.["harness-doctor-guard"];
+            const hasCanonicalStop =
+              guard &&
+              guard.enabled !== false &&
+              Array.isArray(guard.Stop) &&
+              guard.Stop.some((h) => h && h.command === "harness hook run --agent");
+            const hasCanonicalPreTool =
+              guard &&
+              guard.enabled !== false &&
+              Array.isArray(guard.PreToolUse) &&
+              guard.PreToolUse.some(
+                (entry) =>
+                  entry &&
+                  entry.matcher === "run_command" &&
+                  Array.isArray(entry.hooks) &&
+                  entry.hooks.some((h) => h && h.command === "harness hook pre-tool")
+              );
+            if (hasCanonicalStop && hasCanonicalPreTool) {
+              continue;
+            }
+          }
+        } catch {
+          // Fall through to TST003 violation
+        }
+      }
+
       addDiag(
         "TST003",
         changedFile,

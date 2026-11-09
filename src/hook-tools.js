@@ -621,8 +621,17 @@ function isReadOnlyGitCommand(args) {
 
 export function isReadOnlyShellCommand(rawCommandLine, depth = 0) {
   if (depth > 4) return false;
-  const cmdLine = unwrapTranscriptString(rawCommandLine);
+  let cmdLine = unwrapTranscriptString(rawCommandLine);
   if (!cmdLine) return false;
+
+  // Unwrap leading `harness watch ... -- <inner command>` wrapper if present
+  const leadingWatchMatch = cmdLine.match(
+    /^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:node\s+\S*harness\.js|(?:\/\S+\/)?(?:yoryon-)?harness)\s+watch\s+(?:(?!--\s)[^;&|`$])+--\s+([\s\S]+)$/
+  );
+  if (leadingWatchMatch && leadingWatchMatch[1]) {
+    cmdLine = leadingWatchMatch[1].trim();
+    if (!cmdLine) return false;
+  }
 
   // Check and neutralize $(...) command substitutions outside single quotes
   let cleanedCmd = "";
@@ -762,6 +771,16 @@ export function isReadOnlyShellCommand(rawCommandLine, depth = 0) {
     }
     if (bin === "harness" || bin === "yoryon-harness") {
       const sub = args[0] || "";
+      if (sub === "watch") {
+        const dashDashIdx = args.indexOf("--");
+        if (dashDashIdx !== -1 && dashDashIdx + 1 < args.length) {
+          const innerSegment = args.slice(dashDashIdx + 1).join(" ");
+          if (isReadOnlyShellCommand(innerSegment, depth + 1)) {
+            continue;
+          }
+        }
+        return false;
+      }
       if (
         !sub ||
         ["doctor", "rule", "help", "--help", "-h", "--version", "-v"].includes(sub) ||

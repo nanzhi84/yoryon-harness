@@ -4,8 +4,9 @@ import { runInit, runSync } from "../src/init.js";
 import { runDoctor, printRules } from "../src/doctor.js";
 import { runSandboxTask } from "../src/run.js";
 import { createSpec, createAdr, supersedeAdr } from "../src/scaffold.js";
-import { installHooks, runHook } from "../src/hook.js";
+import { installHooks, runHook, runPreToolHook } from "../src/hook.js";
 import { cleanSandboxes, cleanWorktrees } from "../src/clean.js";
+import { runWatchCli, parseWatchArgs } from "../src/watch.js";
 
 const HELP_TEXT = `yoryon-harness — Personal Universal Agent Harness CLI
 
@@ -14,13 +15,15 @@ Usage:
 
 Commands:
   init [--force]                                Initialize Universal Harness directories & docs in current repo
-  sync                                          Sync latest AGENTS.md, docs/README.md, and .agents/hooks.json Stop hook
+  sync                                          Sync latest AGENTS.md, docs/README.md, and .agents/hooks.json hooks
   doctor [--json]                               Check directory conventions, doc/text rules, test contracts, and dead links
   rule [--all | <CODE>]                         Explain Harness check rules (HAR001, DIR001, GIT001, ARC001, SPC001, ADR001/002, REF001, LNK001/002, VOX001, SUP001, TST001-004, MTX001, AST001/002)
-  hook install [--git] [--agents]               Install Git pre-commit & reference-transaction hooks and/or .agents/hooks.json Stop hook
+  hook install [--git] [--agents]               Install Git pre-commit & reference-transaction hooks and/or .agents/hooks.json PreToolUse & Stop hooks
   hook run [--agent] [--staged]                 Execute TTL sandbox & worktree cleanup + doctor + static typecheck & incremental format check
+  hook pre-tool                                 Execute Antigravity PreToolUse watchdog & timeout enforcement check
+  watch --timeout <dur> [options] -- <cmd...>   Run command under watchdog (wall timeout + 5m idle hang detector + 100-line loop breaker)
   clean [--all] [--worktrees] [--max-age 12h]   Clean expired intermediate files in work/ and artifacts/ and prune stale Git worktree metadata
-  run <task-name> -- <cmd> [args...]            Run verification command in isolated work/ & artifacts/ sandbox with receipt
+  run <task-name> [--timeout <dur>] -- <cmd...> Run verification command in isolated work/ & artifacts/ sandbox with receipt
   spec new <issue#<N>> [--title] [--module]     Create an issue-aligned spec directory (docs/spec/issue#<N>/spec.md)
   adr new <slug>                                Create a sequentially numbered ADR (docs/adr/NNNN-<slug>.md)
   adr supersede <old-id> <new> [--reason]       Mark an ADR Superseded, append failure note, and move to docs/adr/superseded/
@@ -84,12 +87,21 @@ async function main() {
         const staged = args.includes("--staged");
         const code = runHook(cwd, { agentMode, staged });
         process.exit(code);
+      } else if (sub === "pre-tool") {
+        const code = runPreToolHook();
+        process.exit(code);
       } else {
         console.error(
-          "Usage:\n  harness hook install [--git] [--agents]\n  harness hook run [--agent] [--staged]"
+          "Usage:\n  harness hook install [--git] [--agents]\n  harness hook run [--agent] [--staged]\n  harness hook pre-tool"
         );
         process.exit(1);
       }
+      break;
+    }
+
+    case "watch": {
+      const code = await runWatchCli(cwd, args.slice(1));
+      process.exit(code);
       break;
     }
 
@@ -111,9 +123,17 @@ async function main() {
 
     case "run": {
       const taskName = args[1];
+      const parsed = parseWatchArgs(args.slice(2));
       const sepIdx = args.indexOf("--");
       const cmdArgs = sepIdx !== -1 ? args.slice(sepIdx + 1) : args.slice(2);
-      const code = await runSandboxTask(cwd, taskName, cmdArgs);
+      const watchOptions = parsed.wallTimeoutMs
+        ? {
+            wallTimeoutMs: parsed.wallTimeoutMs,
+            idleTimeoutMs: parsed.idleTimeoutMs,
+            maxRepeat: parsed.maxRepeat,
+          }
+        : null;
+      const code = await runSandboxTask(cwd, taskName, cmdArgs, watchOptions);
       process.exit(code);
       break;
     }

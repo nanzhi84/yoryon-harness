@@ -3,6 +3,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { cleanSandboxes, ensureWorktreeSharedPaths } from "./clean.js";
 import { buildNormalizedEnv } from "./hook-tools.js";
+import { runWatchedProcess } from "./watch.js";
 
 function formatTimestamp(date = new Date()) {
   const pad = (n) => String(n).padStart(2, "0");
@@ -23,13 +24,13 @@ function sanitizeSlug(name) {
 }
 
 /**
- * `harness run <task-name> -- <command...>`
+ * `harness run <task-name> [--timeout <duration>] -- <command...>`
  * Creates isolated `work/<run-id>/` and `artifacts/<run-id>/`, injects env vars,
  * executes command, and records `stdout.log`, `stderr.log`, and `receipt.json`.
  */
-export async function runSandboxTask(targetRoot, taskName, cmdArgs) {
+export async function runSandboxTask(targetRoot, taskName, cmdArgs, watchOptions = null) {
   if (!taskName || !cmdArgs || cmdArgs.length === 0) {
-    console.error("Usage: harness run <task-name> -- <command> [args...]");
+    console.error("Usage: harness run <task-name> [--timeout <duration>] -- <command> [args...]");
     return 1;
   }
 
@@ -68,35 +69,49 @@ export async function runSandboxTask(targetRoot, taskName, cmdArgs) {
   console.log(`[harness run] work_dir=${path.relative(targetRoot, workDir)}`);
   console.log(`[harness run] artifacts_dir=${path.relative(targetRoot, artifactsDir)}`);
 
-  const exitCode = await new Promise((resolve) => {
-    const child = spawn(cmdArgs[0], cmdArgs.slice(1), {
-      cwd: targetRoot,
+  let exitCode;
+  let watchdogTriggered = null;
+
+  if (watchOptions && watchOptions.wallTimeoutMs) {
+    const res = await runWatchedProcess(targetRoot, cmdArgs, {
+      ...watchOptions,
       env,
-      shell: cmdArgs.length === 1,
-      stdio: ["inherit", "pipe", "pipe"],
+      onStdoutChunk: (chunk) => stdoutStream.write(chunk),
+      onStderrChunk: (chunk) => stderrStream.write(chunk),
     });
+    exitCode = res.exitCode;
+    watchdogTriggered = res.watchdogTriggered;
+  } else {
+    exitCode = await new Promise((resolve) => {
+      const child = spawn(cmdArgs[0], cmdArgs.slice(1), {
+        cwd: targetRoot,
+        env,
+        shell: cmdArgs.length === 1,
+        stdio: ["inherit", "pipe", "pipe"],
+      });
 
-    child.stdout.on("data", (chunk) => {
-      process.stdout.write(chunk);
-      stdoutStream.write(chunk);
-    });
+      child.stdout.on("data", (chunk) => {
+        process.stdout.write(chunk);
+        stdoutStream.write(chunk);
+      });
 
-    child.stderr.on("data", (chunk) => {
-      process.stderr.write(chunk);
-      stderrStream.write(chunk);
-    });
+      child.stderr.on("data", (chunk) => {
+        process.stderr.write(chunk);
+        stderrStream.write(chunk);
+      });
 
-    child.on("error", (err) => {
-      const msg = `Failed to start command: ${err.message}\n`;
-      process.stderr.write(msg);
-      stderrStream.write(msg);
-      resolve(127);
-    });
+      child.on("error", (err) => {
+        const msg = `Failed to start command: ${err.message}\n`;
+        process.stderr.write(msg);
+        stderrStream.write(msg);
+        resolve(127);
+      });
 
-    child.on("close", (code) => {
-      resolve(code ?? 1);
+      child.on("close", (code) => {
+        resolve(code ?? 1);
+      });
     });
-  });
+  }
 
   stdoutStream.end();
   stderrStream.end();
@@ -109,6 +124,7 @@ export async function runSandboxTask(targetRoot, taskName, cmdArgs) {
     taskName: slug,
     command: cmdArgs,
     exitCode,
+    ...(watchdogTriggered ? { watchdogTriggered } : {}),
     startedAt: startedAt.toISOString(),
     completedAt: completedAt.toISOString(),
     durationMs: completedAt.getTime() - startedAt.getTime(),

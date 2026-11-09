@@ -3,7 +3,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { checkStaticTypes } from "./hook-checks.js";
 import { updateHookScript } from "./hook-script.js";
-import { isReadOnlyAgentTurn } from "./hook-tools.js";
+import { isReadOnlyAgentTurn, unwrapTranscriptString } from "./hook-tools.js";
+import { parseDurationMs } from "./watch.js";
 import { checkWorkspace, restoreProtectedMatrices } from "./doctor.js";
 import {
   cleanSandboxes,
@@ -213,26 +214,50 @@ export function installHooks(targetRoot = process.cwd(), options = {}) {
       }
     }
 
-    const hookCommand = "harness hook run --agent";
+    const stopHookCommand = "harness hook run --agent";
+    const preToolHookCommand = "harness hook pre-tool";
     const existingRule = hooksConfig["harness-doctor-guard"];
-    const alreadyConfigured =
+    const hasStop =
       existingRule &&
       Array.isArray(existingRule.Stop) &&
-      existingRule.Stop.some((h) => h.command === hookCommand);
+      existingRule.Stop.some((h) => h.command === stopHookCommand);
+    const hasPreTool =
+      existingRule &&
+      Array.isArray(existingRule.PreToolUse) &&
+      existingRule.PreToolUse.some(
+        (entry) =>
+          entry.matcher === "run_command" &&
+          Array.isArray(entry.hooks) &&
+          entry.hooks.some((h) => h.command === preToolHookCommand)
+      );
 
-    if (!alreadyConfigured) {
+    if (!hasStop || !hasPreTool) {
       hooksConfig["harness-doctor-guard"] = {
         enabled: true,
+        PreToolUse: [
+          {
+            matcher: "run_command",
+            hooks: [
+              {
+                type: "command",
+                command: preToolHookCommand,
+                timeout: 10,
+              },
+            ],
+          },
+        ],
         Stop: [
           {
             type: "command",
-            command: hookCommand,
+            command: stopHookCommand,
             timeout: 30,
           },
         ],
       };
       fs.writeFileSync(hooksPath, JSON.stringify(hooksConfig, null, 2) + "\n", "utf8");
-      actions.push("installed .agents/hooks.json (Stop hook -> `harness hook run --agent`)");
+      actions.push(
+        "installed .agents/hooks.json (PreToolUse -> `harness hook pre-tool`, Stop -> `harness hook run --agent`)"
+      );
     } else {
       actions.push("ok        .agents/hooks.json (already configured)");
     }
@@ -363,4 +388,97 @@ export function runHook(
 
   console.error(message);
   return 1;
+}
+
+const POLLING_LOOP_PATTERNS = [
+  /\bwhile\s+(?:true|1|:)\b/i,
+  /\bwhile\s+True\s*:/,
+  /\bfor\s*\(\(\s*;\s*;\s*\)\)/,
+];
+
+function hasValidWatchdogWrapper(cmdLine) {
+  const trimmed = cmdLine.trim();
+  const match = trimmed.match(
+    /^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:node\s+\S*harness\.js|(?:\/\S+\/)?(?:yoryon-)?harness)\s+(?:watch|run\s+\S+)\s+([\s\S]+)$/
+  );
+  if (!match) return false;
+  const rest = match[1];
+  const dashDashMatch = rest.match(/^(.*?)\s*--\s+(\S[\s\S]*)$/);
+  if (!dashDashMatch) return false;
+  const flagsPart = dashDashMatch[1];
+  const timeoutMatch = flagsPart.match(/(?:^|\s)--timeout(?:=|\s+)(\S+)/);
+  if (!timeoutMatch) return false;
+  const durationMs = parseDurationMs(timeoutMatch[1]);
+  return Boolean(durationMs && durationMs > 0);
+}
+
+/**
+ * Execute Antigravity `PreToolUse` hook (`harness hook pre-tool`).
+ * Enforces that every non-daemon `run_command` is invoked via
+ * `harness watch --timeout <duration> -- <cmd>` and contains no handwritten infinite polling loops.
+ */
+export function runPreToolHook() {
+  let payload = {};
+  if (!process.stdin.isTTY) {
+    try {
+      const rawStdin = fs.readFileSync(0, "utf8").trim();
+      if (rawStdin) {
+        const parsed = JSON.parse(rawStdin);
+        if (parsed && typeof parsed === "object") {
+          payload = parsed;
+        }
+      }
+    } catch {
+      payload = {};
+    }
+  }
+
+  const toolCall = payload.toolCall && typeof payload.toolCall === "object" ? payload.toolCall : {};
+  const toolName = unwrapTranscriptString(String(toolCall.name || ""));
+  if (toolName && toolName !== "run_command") {
+    console.log(JSON.stringify({ decision: "allow" }));
+    return 0;
+  }
+
+  const args = toolCall.args && typeof toolCall.args === "object" ? toolCall.args : {};
+  const isDaemon = args.IsDaemon === true || unwrapTranscriptString(String(args.IsDaemon || "")) === "true";
+  if (isDaemon) {
+    console.log(JSON.stringify({ decision: "allow" }));
+    return 0;
+  }
+
+  const cmdLine = unwrapTranscriptString(String(args.CommandLine ?? args.commandLine ?? ""));
+  if (!cmdLine) {
+    console.log(JSON.stringify({ decision: "allow" }));
+    return 0;
+  }
+
+  for (const pattern of POLLING_LOOP_PATTERNS) {
+    if (pattern.test(cmdLine)) {
+      console.log(
+        JSON.stringify({
+          decision: "deny",
+          reason:
+            "[harness-watchdog] 严禁在命令中编写 while true / for ((;;)) 等死循环轮询逻辑。" +
+            "长耗时命令请设置 WaitMsBeforeAsync=500 转为后台任务等待系统自动唤醒，或使用内置 schedule 工具。",
+        })
+      );
+      return 0;
+    }
+  }
+
+  if (!hasValidWatchdogWrapper(cmdLine)) {
+    console.log(
+      JSON.stringify({
+        decision: "deny",
+        reason:
+          "[harness-watchdog] 每次执行命令必须显式设置超时上限与看门狗！请一律使用格式：" +
+          "`harness watch --timeout <30s|5m|2h> [--idle-timeout 5m] [--max-repeat 100] -- <cmd>`。",
+      })
+    );
+    return 0;
+  }
+
+  console.log(JSON.stringify({ decision: "allow" }));
+  return 0;
 }

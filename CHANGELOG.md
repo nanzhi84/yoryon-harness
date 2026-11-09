@@ -21,6 +21,10 @@
 - 修复 `src/doctor.js` 巡检误扫 Python 虚拟环境与临时协作目录的问题：`IGNORED_WALK_DIRS` 新增忽略 `.venv`、`venv`、`teamwork` 及缓存目录。
 
 ### Added
+- 新增命令看门狗引擎（`src/watch.js`、`harness watch`）与 `PreToolUse` 强制门禁钩子（`harness hook pre-tool`）：
+  - `harness hook install --agents`（及 `init`/`sync`）在 `.agents/hooks.json` 中同时注册 `PreToolUse`（匹配 `run_command` 调用 `harness hook pre-tool`）与 `Stop` 钩子。
+  - `harness hook pre-tool` 强制要求每次非守护进程命令必须显式通过 `harness watch --timeout <duration> [--idle-timeout 5m] [--max-repeat 100] -- <cmd>`（或 `harness run <task> --timeout <duration> -- <cmd>`）执行，并静态拦截 `while true` / `for ((;;))` 等手写轮询死循环。
+  - `harness watch` 提供独立进程组级总时长硬超时（`WALL_TIMEOUT`）、默认 `5m` 静默无输出挂起熔断（`IDLE_TIMEOUT`）、默认连续 `100` 行重复刷屏死循环熔断（`LOOP_DETECTED`）及 `stdin` 关闭保护，超时或熔断时级联清理整个子进程组并以退出码 `124` 返回诊断信息；同时 `isReadOnlyShellCommand` 支持自动解包 `harness watch` 包装以保留只读回合快速放行语义。
 - 新增 PR 合并后远端与本地分支/Worktree 闭环自动清理：`harness init`、`harness sync` 与 `harness hook install` 自动开启本地 `git config --local fetch.prune true`，并自动检测 `origin` GitHub 远端调用 `gh repo edit <owner>/<repo> --delete-branch-on-merge` 开启云端自动删分支（缓存至 `harness.ghDeleteBranchOnMerge`，未绑定远端或 `gh` 失败时打印提醒且不阻塞本地命令）；`src/clean.js`（`cleanWorktrees`）自动识别并删除已合入主干的本地分支及上游远端引用已消失（`[gone]`，含 Squash / Rebase Merge 场景）的本地分支，对绑定了 `[gone]` 分支且工作区干净的子 worktree 自动卸载目录并清理分支，对存在未提交改动的子 worktree 严格保留。
 - 落地跨三仓实证调研（`docs/reference/harness_recurring_issues_survey_zh.md`）全部 12 项通用 Harness 抽象下沉提案（PROP-01 ~ PROP-12）：
   - `DIR001`（PROP-09）：仓库根目录与 `docs/` 目录防污染白名单守卫，拦截 `docs/` 下非标子目录及根目录散落截图/二进制文件（支持 `.agents/harness.json` `rootAllowlist` 扩展）。
