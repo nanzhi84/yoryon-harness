@@ -3,6 +3,12 @@ import { buildNormalizedEnv } from "./hook-tools.js";
 
 export const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5m (300s)
 export const DEFAULT_MAX_REPEAT = 100;
+const SIGNAL_GRACE_MS = 500;
+const HOST_SIGNAL_EXIT_CODES = {
+  SIGHUP: 129,
+  SIGINT: 130,
+  SIGTERM: 143,
+};
 
 /**
  * Parse human-readable duration strings like "300ms", "30s", "5m", "2h", or plain seconds "30".
@@ -53,28 +59,35 @@ export function normalizeLineForRepeatCheck(line) {
     .trim();
 }
 
-function killProcessGroup(child) {
+function signalProcessGroup(child, signal) {
   if (!child || !child.pid) return;
   try {
-    process.kill(-child.pid, "SIGTERM");
+    process.kill(-child.pid, signal);
   } catch {
     try {
-      child.kill("SIGTERM");
+      child.kill(signal);
     } catch {
       // Ignore if already exited
     }
   }
+}
+
+function isProcessGroupAlive(pgid) {
+  if (!pgid || pgid <= 0) return false;
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (err) {
+    return Boolean(err && err.code === "EPERM");
+  }
+}
+
+function killProcessGroup(child, initialSignal = "SIGTERM") {
+  if (!child || !child.pid) return;
+  signalProcessGroup(child, initialSignal);
   const killTimer = setTimeout(() => {
-    try {
-      process.kill(-child.pid, "SIGKILL");
-    } catch {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // Ignore if already exited
-      }
-    }
-  }, 500);
+    signalProcessGroup(child, "SIGKILL");
+  }, SIGNAL_GRACE_MS);
   killTimer.unref();
 }
 
@@ -84,6 +97,7 @@ function killProcessGroup(child) {
  * - Enforces silent hang / inactivity timeout (`idleTimeoutMs`, default 5m)
  * - Enforces consecutive identical line loop breaker (`maxRepeat`, default 100)
  * - Closes stdin (`ignore`) to prevent interactive prompt hangs
+ * - Cascades host `SIGTERM` / `SIGINT` / `SIGHUP` signals to `-child.pid` with `SIGKILL` escalation
  * - Terminates the entire detached process group on breach and returns exitCode 124
  */
 export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
@@ -98,7 +112,11 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
 
   return new Promise((resolve) => {
     let settled = false;
+    let childClosed = false;
     let watchdogTriggered = null;
+    let forwardedSignal = null;
+    let graceTimer = null;
+    let reapTimer = null;
     const startedAt = Date.now();
     let lastActivityAt = startedAt;
     let lastNormalizedLine = null;
@@ -114,22 +132,72 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
       stdio: ["ignore", "pipe", "pipe"],
     });
 
-    const emitWatchdogError = (code, detail) => {
+    const signalListeners = [];
+
+    const finish = (result) => {
       if (settled) return;
-      watchdogTriggered = code;
       settled = true;
       clearInterval(checkTimer);
+      if (graceTimer) clearTimeout(graceTimer);
+      if (reapTimer) clearInterval(reapTimer);
+      for (const [sig, listener] of signalListeners) {
+        process.off(sig, listener);
+      }
+      resolve(result);
+    };
+
+    for (const sig of Object.keys(HOST_SIGNAL_EXIT_CODES)) {
+      const listener = () => {
+        if (settled) return;
+        if (forwardedSignal) {
+          signalProcessGroup(child, "SIGKILL");
+          return;
+        }
+        forwardedSignal = sig;
+        const signalExitCode = HOST_SIGNAL_EXIT_CODES[sig];
+        clearInterval(checkTimer);
+        signalProcessGroup(child, sig);
+
+        if (!child.pid || (childClosed && !isProcessGroupAlive(child.pid))) {
+          finish({ exitCode: signalExitCode, watchdogTriggered: null });
+          return;
+        }
+
+        const signalReceivedAt = Date.now();
+        graceTimer = setTimeout(() => {
+          signalProcessGroup(child, "SIGKILL");
+        }, SIGNAL_GRACE_MS);
+
+        reapTimer = setInterval(() => {
+          if (settled) return;
+          if (childClosed && !isProcessGroupAlive(child.pid)) {
+            finish({ exitCode: signalExitCode, watchdogTriggered: null });
+            return;
+          }
+          if (Date.now() - signalReceivedAt >= SIGNAL_GRACE_MS + 300) {
+            signalProcessGroup(child, "SIGKILL");
+            finish({ exitCode: signalExitCode, watchdogTriggered: null });
+          }
+        }, 20);
+      };
+      process.on(sig, listener);
+      signalListeners.push([sig, listener]);
+    }
+
+    const emitWatchdogError = (code, detail) => {
+      if (settled || forwardedSignal) return;
+      watchdogTriggered = code;
       const msg = `\n[harness-watchdog] ${code}: ${detail}\n`;
       process.stderr.write(msg);
       if (onStderrChunk) {
         onStderrChunk(Buffer.from(msg, "utf8"));
       }
       killProcessGroup(child);
-      resolve({ exitCode: 124, watchdogTriggered });
+      finish({ exitCode: 124, watchdogTriggered });
     };
 
     const inspectLines = (textChunk, isStderr = false) => {
-      if (settled) return;
+      if (settled || forwardedSignal) return;
       const combined = (isStderr ? stderrPartial : stdoutPartial) + textChunk;
       const parts = combined.split(/\r?\n/);
       const remainder = parts.pop() ?? "";
@@ -164,7 +232,7 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
     );
 
     const checkTimer = setInterval(() => {
-      if (settled) return;
+      if (settled || forwardedSignal) return;
       const now = Date.now();
       if (now - startedAt >= wallTimeoutMs) {
         emitWatchdogError(
@@ -198,20 +266,25 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
     });
 
     child.on("error", (err) => {
+      childClosed = true;
       if (settled) return;
-      settled = true;
-      clearInterval(checkTimer);
       const msg = `[harness-watchdog] Failed to start command: ${err.message}\n`;
       process.stderr.write(msg);
       if (onStderrChunk) onStderrChunk(Buffer.from(msg, "utf8"));
-      resolve({ exitCode: 127, watchdogTriggered: null });
+      finish({ exitCode: 127, watchdogTriggered: null });
     });
 
     child.on("close", (code) => {
+      childClosed = true;
       if (settled) return;
-      settled = true;
-      clearInterval(checkTimer);
-      resolve({ exitCode: code ?? 1, watchdogTriggered: null });
+      if (forwardedSignal) {
+        const signalExitCode = HOST_SIGNAL_EXIT_CODES[forwardedSignal];
+        if (!child.pid || !isProcessGroupAlive(child.pid)) {
+          finish({ exitCode: signalExitCode, watchdogTriggered: null });
+        }
+        return;
+      }
+      finish({ exitCode: code ?? 1, watchdogTriggered: null });
     });
   });
 }

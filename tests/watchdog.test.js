@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
+import { runWatchedProcess } from "../src/watch.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CLI_BIN = path.join(ROOT, "bin", "harness.js");
@@ -313,5 +314,252 @@ describe("TestPreToolWatchdogHook", () => {
     } finally {
       fs.rmSync(sandbox, { recursive: true, force: true });
     }
+  });
+});
+
+function isPidGoneEsrch(pid) {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return Boolean(err && err.code === "ESRCH");
+  }
+}
+
+async function waitWithTimeout(promise, timeoutMs, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function waitForReadyFile(readyFilePath, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(readyFilePath)) {
+      const raw = fs.readFileSync(readyFilePath, "utf8");
+      return JSON.parse(raw);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out after ${timeoutMs}ms waiting for ready file: ${readyFilePath}`);
+}
+
+async function assertPidsTerminatedWithEsrch(pids, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pids.every((pid) => isPidGoneEsrch(pid))) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  for (const pid of pids) {
+    assert.throws(
+      () => process.kill(pid, 0),
+      { code: "ESRCH" },
+      `Expected PID ${pid} to be terminated with ESRCH, but process is still alive`
+    );
+  }
+}
+
+async function verifyWatcherSignalCascade({
+  signal,
+  expectedExitCode,
+  ignoreSignals = [],
+}) {
+  fs.mkdirSync(path.join(ROOT, "work"), { recursive: true });
+  const sandbox = fs.mkdtempSync(path.join(ROOT, "work", "watchdog-signal-"));
+  const readyFilePath = path.join(sandbox, "ready.json");
+  const grandchildScriptPath = path.join(sandbox, "grandchild.js");
+  const childScriptPath = path.join(sandbox, "child.js");
+
+  const ignoreSnippet = `const IGNORE_SIGNALS = ${JSON.stringify(ignoreSignals)};\nfor (const sig of IGNORE_SIGNALS) { process.on(sig, () => {}); }\n`;
+
+  fs.writeFileSync(
+    grandchildScriptPath,
+    `${ignoreSnippet}process.stdout.write("grandchild-ready\\n");\nsetInterval(() => {}, 1000);\n`,
+    "utf8"
+  );
+
+  fs.writeFileSync(
+    childScriptPath,
+    [
+      'import fs from "node:fs";',
+      'import { spawn } from "node:child_process";',
+      "const [readyFile, grandchildScript] = process.argv.slice(2);",
+      ignoreSnippet,
+      "const grandchild = spawn(process.execPath, [grandchildScript], {",
+      '  stdio: ["ignore", "pipe", "pipe"],',
+      "  timeout: 25000,",
+      "});",
+      'grandchild.stdout.once("data", () => {',
+      "  const tmpFile = `${readyFile}.tmp`;",
+      "  fs.writeFileSync(",
+      "    tmpFile,",
+      "    JSON.stringify({ pid: process.pid, grandchildPid: grandchild.pid }),",
+      '    "utf8"',
+      "  );",
+      "  fs.renameSync(tmpFile, readyFile);",
+      "});",
+      "setInterval(() => {}, 1000);",
+      "",
+    ].join("\n"),
+    "utf8"
+  );
+
+  const trackedPids = new Set();
+  let watchProc;
+
+  try {
+    watchProc = spawn(
+      process.execPath,
+      [
+        CLI_BIN,
+        "watch",
+        "--timeout",
+        "30s",
+        "--",
+        process.execPath,
+        childScriptPath,
+        readyFilePath,
+        grandchildScriptPath,
+      ],
+      {
+        cwd: ROOT,
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        timeout: 15000,
+      }
+    );
+
+    if (watchProc.pid) {
+      trackedPids.add(watchProc.pid);
+    }
+
+    let stderrBuf = "";
+    watchProc.stdout.resume();
+    watchProc.stderr.on("data", (chunk) => {
+      stderrBuf += chunk.toString("utf8");
+    });
+
+    const exitPromise = new Promise((resolve, reject) => {
+      watchProc.once("error", reject);
+      watchProc.once("exit", (code, exitSignal) => {
+        resolve({ code, exitSignal });
+      });
+    });
+
+    const { pid: childPid, grandchildPid } = await waitForReadyFile(readyFilePath, 5000);
+    trackedPids.add(childPid);
+    trackedPids.add(grandchildPid);
+
+    assert.equal(isPidGoneEsrch(childPid), false, "Expected child process to be running before signal");
+    assert.equal(isPidGoneEsrch(grandchildPid), false, "Expected grandchild process to be running before signal");
+
+    const signalSentAt = Date.now();
+    process.kill(watchProc.pid, signal);
+
+    const { code, exitSignal } = await waitWithTimeout(
+      exitPromise,
+      3000,
+      `harness watch did not exit within 3000ms after receiving ${signal} (stderr: ${stderrBuf})`
+    );
+    const elapsedMs = Date.now() - signalSentAt;
+
+    assert.ok(
+      elapsedMs < 3000,
+      `Expected harness watch to exit promptly (< 3000ms) on ${signal}, took ${elapsedMs}ms`
+    );
+    assert.ok(
+      code === expectedExitCode || exitSignal === signal,
+      `Expected exit code ${expectedExitCode} or signal ${signal}, got code=${code}, signal=${exitSignal} (stderr: ${stderrBuf})`
+    );
+
+    await assertPidsTerminatedWithEsrch([childPid, grandchildPid], 1000);
+  } finally {
+    try {
+      if (fs.existsSync(readyFilePath)) {
+        const parsed = JSON.parse(fs.readFileSync(readyFilePath, "utf8"));
+        if (parsed?.pid) trackedPids.add(parsed.pid);
+        if (parsed?.grandchildPid) trackedPids.add(parsed.grandchildPid);
+      }
+    } catch {}
+
+    for (const pid of trackedPids) {
+      if (Number.isInteger(pid) && pid > 0) {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {}
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {}
+      }
+    }
+
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
+}
+
+describe("TestWatchdogSignalCascade", () => {
+  it("test_sigterm_on_watcher_terminates_process_tree_and_exits_143", async () => {
+    await verifyWatcherSignalCascade({
+      signal: "SIGTERM",
+      expectedExitCode: 143,
+    });
+  });
+
+  it("test_sigint_on_watcher_terminates_process_tree_and_exits_130", async () => {
+    await verifyWatcherSignalCascade({
+      signal: "SIGINT",
+      expectedExitCode: 130,
+    });
+  });
+
+  it("test_sighup_on_watcher_terminates_process_tree_and_exits_129", async () => {
+    await verifyWatcherSignalCascade({
+      signal: "SIGHUP",
+      expectedExitCode: 129,
+    });
+  });
+
+  it("test_stubborn_process_tree_ignoring_sigterm_is_force_killed_within_grace_period", async () => {
+    await verifyWatcherSignalCascade({
+      signal: "SIGTERM",
+      expectedExitCode: 143,
+      ignoreSignals: ["SIGTERM"],
+    });
+  });
+
+  it("test_repeated_normal_runs_do_not_leak_host_signal_listeners", async () => {
+    assert.equal(typeof runWatchedProcess, "function");
+    const signals = ["SIGTERM", "SIGINT", "SIGHUP"];
+    const beforeCounts = Object.fromEntries(
+      signals.map((sig) => [sig, process.listenerCount(sig)])
+    );
+
+    for (let i = 0; i < 5; i += 1) {
+      const res = await runWatchedProcess(
+        ROOT,
+        [process.execPath, "-e", "process.exit(0)"],
+        { wallTimeoutMs: 5000 }
+      );
+      if (typeof res === "number") {
+        assert.equal(res, 0);
+      } else if (res && typeof res === "object" && "exitCode" in res) {
+        assert.equal(res.exitCode, 0);
+      }
+    }
+
+    const afterCounts = Object.fromEntries(
+      signals.map((sig) => [sig, process.listenerCount(sig)])
+    );
+    assert.deepEqual(afterCounts, beforeCounts);
   });
 });
