@@ -85,7 +85,9 @@ async function main() {
       } else if (sub === "run") {
         const agentMode = args.includes("--agent");
         const staged = args.includes("--staged");
-        const code = runHook(cwd, { agentMode, staged });
+        const noCache = args.includes("--no-cache");
+        const full = args.includes("--full");
+        const code = await runHook(cwd, { agentMode, staged, noCache, full });
         process.exit(code);
       } else if (sub === "pre-tool") {
         const code = runPreToolHook();

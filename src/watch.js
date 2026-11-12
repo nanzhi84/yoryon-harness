@@ -1,5 +1,14 @@
+import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { buildNormalizedEnv } from "./hook-tools.js";
+
+function isRegularFileStdin() {
+  try {
+    return fs.fstatSync(0).isFile();
+  } catch {
+    return false;
+  }
+}
 
 export const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5m (300s)
 export const DEFAULT_MAX_REPEAT = 100;
@@ -124,12 +133,18 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
     let stdoutPartial = "";
     let stderrPartial = "";
 
+    const stdinOption = isRegularFileStdin() ? 0 : "ignore";
+    const shellOption =
+      cmdArgs.length === 1
+        ? (env && env.SHELL) || process.env.SHELL || true
+        : false;
+
     const child = spawn(cmdArgs[0], cmdArgs.slice(1), {
       cwd: targetRoot,
       env,
-      shell: cmdArgs.length === 1,
+      shell: shellOption,
       detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [stdinOption, "pipe", "pipe"],
     });
 
     const signalListeners = [];

@@ -5,12 +5,17 @@
 ## [Unreleased]
 
 ### Removed
+- 移除 `templates/AGENTS.md` 中的手动“静态与契约检查”条款（Issue #2）：静态类型、Linter 与契约巡检统一收归自动化 Git `pre-commit` 与轻量 `Stop` 钩子守护，违规时由钩子按需注入规则说明与豁免指引，消除提示词驱使模型重复跑全仓 `pyright` 的时间开销。
 - 移除 `harness tdd verify` 命令及相关实现（`src/tdd.js`、`src/tdd-files.js`、`tests/tdd_restoration.test.js`）：进程级 `exitCode !== 0` 红灯校验在 Agent 批量编写多条测试用例时存在单条用例失败或 `ImportError` 即整体放行的搭便车漏洞，统一收敛为静态测试契约巡检（`TST001`~`TST004`）、独立子代理（Fresh Subagent）黑盒盲写测试与 `harness run` 隔离沙盒真实验收。
 
 ### Changed
+- 门禁职责分级与跨阶段指纹去重（Issue #2）：
+  - `harness hook run --agent`（`Stop` 钩子）收敛为亚秒级轻量结构与反作弊护栏（仅对未验证脏工作区执行 `doctor` 与 `MTX001` 自动还原，跳过重型外部类型检查器以免阻塞 Fresh Subagent TDD 红灯阶段与半成品交互），并接入 `<git-dir>/harness-verify-cache.json` 内容寻址指纹与 `lastPassedStepIndex` 游标快速短路。
+  - `harness hook run --staged`（Git `pre-commit` 钩子）重构为 `Promise.all` 并发执行 `doctor` 与按 `allTouchedPaths`（含删除路径 `D`）精确门控的静态检查（Pyright、显式配置的 Pyrefly、Ruff、Ruff Format、ESLint、Prettier、TSC），修复 `ruff` / `eslint` 空变更回退全仓扫描与未配置仓库隐式强拉 IDE 插件 `pyrefly` 的问题，并通过 `git write-tree` 预签发提交后新树指纹实现跨阶段零重复扫描。
 - 默认根目录白名单收紧为 10 个通用工作区目录；框架、编辑器和业务目录由各项目 `.agents/harness.json` 的 `rootAllowlist` 显式声明。根目录权限不再复用递归内容扫描的依赖/构建排除名单，保留 Git 忽略及已声明共享路径语义。
 
 ### Fixed
+- 修复 `src/watch.js` 固定忽略 `stdin` 导致 Shell Heredoc（`<< 'EOF'`）读取为空及单参数模式不支持 `$SHELL` 语法的问题，同时在 `src/hook-tools.js` 中补齐 `sh` / `bash` / `zsh` `-c` 解包与协作调度工具（`send_message`、`schedule`、`define_subagent`、`research` 子代理、`swarm` 状态查询）只读识别（Issue #2）。
 - 修复 `src/watch.js`（`runWatchedProcess`）在宿主会话取消或中断时未向 `detached: true` 独立子进程组级联转发终止信号的问题：新增宿主 `SIGTERM` / `SIGINT` / `SIGHUP` 监听并立即向 `-child.pid` 转发对应信号，支持 500ms 宽限期后升级 `SIGKILL` 强制收割顽固子/孙进程、等待进程组彻底消亡后按标准信号退出码（`143` / `130` / `129`）返回，并在任意结束分支自动解绑宿主信号监听器实现零泄漏。
 - 修复 `harness hook run --agent` 在纯只读回合（纯问答、仅调用 `read_file`/`grep_search` 等只读工具、仅执行 `git status`/`git diff`/`ls`/`cat`/`harness doctor` 等只读 Shell 命令、或修改类调用被拒绝报错）结束时仍无条件触发沙盒清理与全套静态检查的问题：`src/hook-tools.js` 新增 `isReadOnlyShellCommand`、`isReadOnlyToolCall` 与 `isReadOnlyAgentTurn`（解析 `stdin` 的 `transcriptPath` 最新 `USER_INPUT` 后的工具调用记录及 `transcript_full.jsonl` 回退），只读回合直接返回 `{"decision":"stop"}` 放行。
 - 修复 `src/clean.js` 对远端跟踪分支显示为 `[gone]` 的本地分支与干净子 worktree 未校验代码是否已合入主分支即强制删除的风险：新增 `git merge-tree --write-tree` 模拟合并等价性校验（结合 `git for-each-ref --merged` 祖先检查），仅当分支净改动已完整包含于主分支（含普通 Merge、Rebase Merge 与多提交 Squash Merge）时才移除干净子 worktree 并执行 `git branch -D`，对远端分支未合并直接删除或本地尚有未推送新提交的分支严格保留。

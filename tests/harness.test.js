@@ -317,18 +317,15 @@ describe("TestUniversalHarness", () => {
   }
   fs.rmSync(badTestForCancel, { force: true });
 
-  // 8b. Pyright & Pyrefly strict error/warning blocking on NO_TOOL_CALL
-  const blockStopRes = runCli(sandboxRoot, ["hook", "run", "--agent"], {
-    input: JSON.stringify({ terminationReason: "NO_TOOL_CALL" }),
-  });
-  const blockStopJson = JSON.parse(blockStopRes.stdout.trim());
-  assert.equal(blockStopJson.decision, "continue");
-  assert.ok(blockStopJson.reason.includes("[pyright]"), "Reason should include [pyright]");
-  assert.ok(blockStopJson.reason.includes("src/app.py:10:5"), "Reason should include 1-based pyright location src/app.py:10:5");
-  assert.ok(blockStopJson.reason.includes("reportUnknownVariableType"), "Reason should include reportUnknownVariableType");
-  assert.ok(blockStopJson.reason.includes("[pyrefly]"), "Reason should include [pyrefly]");
-  assert.ok(blockStopJson.reason.includes("src/app.py:12:1"), "Reason should include pyrefly location src/app.py:12:1");
-  assert.ok(blockStopJson.reason.includes("bad-return"), "Reason should include bad-return");
+  // 8b. Pyright & Pyrefly strict error/warning blocking on pre-commit / explicit hook run
+  const blockHookRes = runCli(sandboxRoot, ["hook", "run"]);
+  assert.equal(blockHookRes.status, 1);
+  assert.ok(blockHookRes.stderr.includes("[pyright]"), "Stderr should include [pyright]");
+  assert.ok(blockHookRes.stderr.includes("src/app.py:10:5"), "Stderr should include 1-based pyright location src/app.py:10:5");
+  assert.ok(blockHookRes.stderr.includes("reportUnknownVariableType"), "Stderr should include reportUnknownVariableType");
+  assert.ok(blockHookRes.stderr.includes("[pyrefly]"), "Stderr should include [pyrefly]");
+  assert.ok(blockHookRes.stderr.includes("src/app.py:12:1"), "Stderr should include pyrefly location src/app.py:12:1");
+  assert.ok(blockHookRes.stderr.includes("bad-return"), "Stderr should include bad-return");
 
   // Update pyright and pyrefly to output 0 errors and 0 warnings
   fs.writeFileSync(
@@ -344,14 +341,10 @@ describe("TestUniversalHarness", () => {
   fs.chmodSync(pyrightBin, 0o755);
   fs.chmodSync(pyreflyBin, 0o755);
 
-  const allowStopRes = runCli(sandboxRoot, ["hook", "run", "--agent"], {
-    input: JSON.stringify({ terminationReason: "NO_TOOL_CALL" }),
-  });
-  assert.equal(allowStopRes.status, 0);
-  const allowStopJson = JSON.parse(allowStopRes.stdout.trim());
-  assert.equal(allowStopJson.decision, "stop");
+  const allowHookRes = runCli(sandboxRoot, ["hook", "run"]);
+  assert.equal(allowHookRes.status, 0, allowHookRes.stderr);
 
-  // 8c. Ruff (Python Linter) blocking on NO_TOOL_CALL
+  // 8c. Ruff (Python Linter) blocking on explicit hook run
   const ruffBin = path.join(venvBinDir, "ruff");
   const ruffPayload = JSON.stringify([
     {
@@ -368,17 +361,14 @@ describe("TestUniversalHarness", () => {
   );
   fs.chmodSync(ruffBin, 0o755);
 
-  const ruffBlockRes = runCli(sandboxRoot, ["hook", "run", "--agent"], {
-    input: JSON.stringify({ terminationReason: "NO_TOOL_CALL" }),
-  });
-  const ruffBlockJson = JSON.parse(ruffBlockRes.stdout.trim());
-  assert.equal(ruffBlockJson.decision, "continue");
-  assert.ok(ruffBlockJson.reason.includes("[ruff]"), "Reason should include [ruff]");
-  assert.ok(ruffBlockJson.reason.includes("src/app.py:3:8"), "Reason should include src/app.py:3:8");
-  assert.ok(ruffBlockJson.reason.includes("F401"), "Reason should include F401");
-  assert.ok(ruffBlockJson.reason.includes("imported but unused"), "Reason should include imported but unused");
+  const ruffBlockRes = runCli(sandboxRoot, ["hook", "run"]);
+  assert.equal(ruffBlockRes.status, 1);
+  assert.ok(ruffBlockRes.stderr.includes("[ruff]"), "Stderr should include [ruff]");
+  assert.ok(ruffBlockRes.stderr.includes("src/app.py:3:8"), "Stderr should include src/app.py:3:8");
+  assert.ok(ruffBlockRes.stderr.includes("F401"), "Stderr should include F401");
+  assert.ok(ruffBlockRes.stderr.includes("imported but unused"), "Stderr should include imported but unused");
 
-  // 8d. ESLint (JS/TS Linter) blocking on NO_TOOL_CALL
+  // 8d. ESLint (JS/TS Linter) blocking on explicit hook run
   fs.writeFileSync(path.join(sandboxRoot, "eslint.config.js"), "export default [];\n", "utf8");
   const nodeBinDir = path.join(sandboxRoot, "node_modules", ".bin");
   fs.mkdirSync(nodeBinDir, { recursive: true });
@@ -406,15 +396,12 @@ describe("TestUniversalHarness", () => {
   );
   fs.chmodSync(eslintBin, 0o755);
 
-  const eslintBlockRes = runCli(sandboxRoot, ["hook", "run", "--agent"], {
-    input: JSON.stringify({ terminationReason: "NO_TOOL_CALL" }),
-  });
-  const eslintBlockJson = JSON.parse(eslintBlockRes.stdout.trim());
-  assert.equal(eslintBlockJson.decision, "continue");
-  assert.ok(eslintBlockJson.reason.includes("[eslint]"), "Reason should include [eslint]");
-  assert.ok(eslintBlockJson.reason.includes("src/index.js:7:10"), "Reason should include src/index.js:7:10");
-  assert.ok(eslintBlockJson.reason.includes("no-unused-vars"), "Reason should include no-unused-vars");
-  assert.ok(eslintBlockJson.reason.includes("never used"), "Reason should include never used");
+  const eslintBlockRes = runCli(sandboxRoot, ["hook", "run"]);
+  assert.equal(eslintBlockRes.status, 1);
+  assert.ok(eslintBlockRes.stderr.includes("[eslint]"), "Stderr should include [eslint]");
+  assert.ok(eslintBlockRes.stderr.includes("src/index.js:7:10"), "Stderr should include src/index.js:7:10");
+  assert.ok(eslintBlockRes.stderr.includes("no-unused-vars"), "Stderr should include no-unused-vars");
+  assert.ok(eslintBlockRes.stderr.includes("never used"), "Stderr should include never used");
 
   // 8e. Clean pass when both Ruff and ESLint output []
   fs.writeFileSync(
@@ -430,12 +417,8 @@ describe("TestUniversalHarness", () => {
   fs.chmodSync(ruffBin, 0o755);
   fs.chmodSync(eslintBin, 0o755);
 
-  const linterCleanRes = runCli(sandboxRoot, ["hook", "run", "--agent"], {
-    input: JSON.stringify({ terminationReason: "NO_TOOL_CALL" }),
-  });
-  assert.equal(linterCleanRes.status, 0);
-  const linterCleanJson = JSON.parse(linterCleanRes.stdout.trim());
-  assert.equal(linterCleanJson.decision, "stop");
+  const linterCleanRes = runCli(sandboxRoot, ["hook", "run"]);
+  assert.equal(linterCleanRes.status, 0, linterCleanRes.stderr);
 
   // 9. Git Worktree Metadata & Ghost Directory GC (harness hook install --git & harness clean --worktrees)
   assert.equal(
@@ -1277,13 +1260,10 @@ describe("TestUniversalHarness", () => {
   fs.mkdirSync(path.join(sandboxRoot, "src"), { recursive: true });
   fs.writeFileSync(path.join(sandboxRoot, "src", "app.py"), "x=1\n", "utf8");
 
-  const ruffFmtBlockRes = runCli(sandboxRoot, ["hook", "run", "--agent"], {
-    input: JSON.stringify({ terminationReason: "NO_TOOL_CALL" }),
-  });
-  const ruffFmtJson = JSON.parse(ruffFmtBlockRes.stdout.trim());
-  assert.equal(ruffFmtJson.decision, "continue");
+  const ruffFmtBlockRes = runCli(sandboxRoot, ["hook", "run"]);
+  assert.equal(ruffFmtBlockRes.status, 1);
   assert.ok(
-    ruffFmtJson.reason.includes("[ruff-format]") && ruffFmtJson.reason.includes("src/app.py"),
+    ruffFmtBlockRes.stderr.includes("[ruff-format]") && ruffFmtBlockRes.stderr.includes("src/app.py"),
     "Unformatted Python file must be blocked by [ruff-format] in hook"
   );
 
@@ -1349,13 +1329,10 @@ describe("TestUniversalHarness", () => {
   fs.writeFileSync(path.join(sandboxRoot, ".prettierrc"), "{}\n", "utf8");
   fs.writeFileSync(path.join(sandboxRoot, "src", "ui.ts"), "export const x=1;\n", "utf8");
 
-  const prettierBlockRes = runCli(sandboxRoot, ["hook", "run", "--agent"], {
-    input: JSON.stringify({ terminationReason: "NO_TOOL_CALL" }),
-  });
-  const prettierJson = JSON.parse(prettierBlockRes.stdout.trim());
-  assert.equal(prettierJson.decision, "continue");
+  const prettierBlockRes = runCli(sandboxRoot, ["hook", "run"]);
+  assert.equal(prettierBlockRes.status, 1);
   assert.ok(
-    prettierJson.reason.includes("[prettier]") && prettierJson.reason.includes("src/ui.ts"),
+    prettierBlockRes.stderr.includes("[prettier]") && prettierBlockRes.stderr.includes("src/ui.ts"),
     "Unformatted TS file must be blocked by [prettier] in hook"
   );
 

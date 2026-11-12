@@ -3,7 +3,15 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { checkStaticTypes } from "./hook-checks.js";
 import { updateHookScript } from "./hook-script.js";
-import { isReadOnlyAgentTurn, unwrapTranscriptString } from "./hook-tools.js";
+import {
+  isReadOnlyAgentTurn,
+  unwrapTranscriptString,
+  loadVerifyCache,
+  saveVerifyCache,
+  computeWorkspaceDigest,
+  computePreSignedNextCommitDigest,
+  computeTranscriptCursorSnapshot,
+} from "./hook-tools.js";
 import { parseDurationMs } from "./watch.js";
 import { checkWorkspace, restoreProtectedMatrices } from "./doctor.js";
 import {
@@ -271,17 +279,22 @@ export function installHooks(targetRoot = process.cwd(), options = {}) {
 }
 
 /**
- * Execute hook check (`harness hook run [--agent] [--staged]`).
- * When `--agent` is set and issues are found, outputs Antigravity Stop hook JSON
- * (`{"decision":"continue","reason":"..."}`) and exits with code 2 so coding agents
- * are blocked from stopping and automatically repair documentation, test contracts, and static type errors.
+ * Execute hook check (`harness hook run [--agent] [--staged] [--no-cache] [--full]`).
+ * - `--agent` (Stop hook): Lightweight structural & anti-cheat guard only (`doctor` + `MTX001` auto-revert,
+ *   skipping heavy static typecheckers so TDD Red Phase & mid-work turns are never blocked by `pyright`/`tsc`),
+ *   short-circuiting on read-only turns and `<git-dir>/harness-verify-cache.json` hits.
+ * - `--staged` (`pre-commit`) / default: Runs `doctor` + change-aware concurrent `checkStaticTypes`,
+ *   and pre-signs `nextHeadTree` into `<git-dir>/harness-verify-cache.json` via `git write-tree`.
  */
-export function runHook(
+export async function runHook(
   targetRoot = process.cwd(),
-  { agentMode = false, staged = false } = {}
+  { agentMode = false, staged = false, noCache = false, full = false } = {}
 ) {
+  const bypassCache = Boolean(noCache || process.env.HARNESS_NO_CACHE === "1");
+  let payload = {};
+  const cacheState = loadVerifyCache(targetRoot);
+
   if (agentMode && !process.stdin.isTTY) {
-    let payload = {};
     try {
       const rawStdin = fs.readFileSync(0, "utf8").trim();
       if (rawStdin) {
@@ -303,9 +316,42 @@ export function runHook(
       return 0;
     }
 
-    // Skip hook checks and cleanup when the current turn only performed read-only operations.
-    if (isReadOnlyAgentTurn(payload)) {
+    // Skip hook checks and cleanup when the current turn (or slice after lastPassedStepIndex) only performed read-only operations.
+    if (isReadOnlyAgentTurn(payload, { cacheState })) {
       console.log(JSON.stringify({ decision: "stop" }));
+      return 0;
+    }
+  }
+
+  const wsState = computeWorkspaceDigest(targetRoot);
+
+  if (!bypassCache && wsState) {
+    if (agentMode) {
+      const isDoctorVerified =
+        cacheState.doctorDigests.includes(wsState.digest) ||
+        cacheState.fullDigests.includes(wsState.digest);
+      if (isDoctorVerified) {
+        if (payload && typeof payload.transcriptPath === "string") {
+          const cursorSnap = computeTranscriptCursorSnapshot(payload.transcriptPath);
+          if (cursorSnap) {
+            cacheState.stopCursors[cursorSnap.key] = cursorSnap.entry;
+            saveVerifyCache(targetRoot, cacheState);
+          }
+        }
+        console.log(JSON.stringify({ decision: "stop" }));
+        return 0;
+      }
+    } else if (!full && cacheState.fullDigests.includes(wsState.digest)) {
+      if (staged) {
+        const preSigned = computePreSignedNextCommitDigest(targetRoot, wsState.cliSalt);
+        if (preSigned) {
+          cacheState.doctorDigests.push(preSigned.digest);
+          if (!preSigned.hasUntracked) {
+            cacheState.fullDigests.push(preSigned.digest);
+          }
+          saveVerifyCache(targetRoot, cacheState);
+        }
+      }
       return 0;
     }
   }
@@ -317,7 +363,18 @@ export function runHook(
     // Non-fatal: never block hook execution if sandbox cleanup encounters transient FS error
   }
 
-  const diagnostics = checkWorkspace(targetRoot);
+  let diagnostics;
+  let typecheck;
+
+  if (agentMode) {
+    diagnostics = checkWorkspace(targetRoot);
+    typecheck = { issues: [], errorCount: 0, warningCount: 0 };
+  } else {
+    [diagnostics, typecheck] = await Promise.all([
+      Promise.resolve().then(() => checkWorkspace(targetRoot)),
+      checkStaticTypes(targetRoot, { staged, full }),
+    ]);
+  }
 
   // PROP-02: If protected matrices were tampered with, automatically revert immutable cells from HEAD
   if (diagnostics.some((d) => d.code === "MTX001")) {
@@ -335,13 +392,35 @@ export function runHook(
     }
   }
 
-  const typecheck = checkStaticTypes(targetRoot, { staged });
   const hasTypeIssues =
     typecheck.issues.length > 0 ||
     typecheck.errorCount > 0 ||
     typecheck.warningCount > 0;
 
   if (diagnostics.length === 0 && !hasTypeIssues) {
+    if (wsState) {
+      cacheState.doctorDigests.push(wsState.digest);
+      if (!agentMode && !staged) {
+        cacheState.fullDigests.push(wsState.digest);
+      }
+      if (!agentMode && staged) {
+        const preSigned = computePreSignedNextCommitDigest(targetRoot, wsState.cliSalt);
+        if (preSigned) {
+          cacheState.doctorDigests.push(preSigned.digest);
+          if (!preSigned.hasUntracked) {
+            cacheState.fullDigests.push(preSigned.digest);
+          }
+        }
+      }
+      if (agentMode && payload && typeof payload.transcriptPath === "string") {
+        const cursorSnap = computeTranscriptCursorSnapshot(payload.transcriptPath);
+        if (cursorSnap) {
+          cacheState.stopCursors[cursorSnap.key] = cursorSnap.entry;
+        }
+      }
+      saveVerifyCache(targetRoot, cacheState);
+    }
+
     if (agentMode) {
       console.log(JSON.stringify({ decision: "stop" }));
     }

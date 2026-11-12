@@ -1,8 +1,22 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { resolveGitCommonDir } from "./clean.js";
+
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const CLI_PACKAGE_VERSION = (() => {
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(MODULE_DIR, "..", "package.json"), "utf8")
+    );
+    return String(pkg.version || "0.0.0");
+  } catch {
+    return "0.0.0";
+  }
+})();
 
 /**
  * PROP-06: Build normalized PATH covering project-local virtualenvs and multi-language user toolchains.
@@ -61,8 +75,8 @@ export function isExecutableFile(filePath) {
   }
 }
 
-export function findInPath(binName, targetRoot = process.cwd()) {
-  const pathEnv = buildNormalizedPath(targetRoot);
+export function findInPath(binName, targetRoot = process.cwd(), baseEnv = process.env) {
+  const pathEnv = buildNormalizedPath(targetRoot, (baseEnv && baseEnv.PATH) || "");
   for (const dir of pathEnv.split(path.delimiter)) {
     if (!dir) continue;
     const candidate = path.join(dir, binName);
@@ -73,49 +87,72 @@ export function findInPath(binName, targetRoot = process.cwd()) {
   return null;
 }
 
-export function findPyrefly(targetRoot) {
+export function isPyreflyConfigured(targetRoot = process.cwd()) {
+  const venvPyrefly = path.join(targetRoot, ".venv", "bin", "pyrefly");
+  if (isExecutableFile(venvPyrefly)) {
+    return true;
+  }
+  if (fs.existsSync(path.join(targetRoot, "pyrefly.toml"))) {
+    return true;
+  }
+  const pyprojectPath = path.join(targetRoot, "pyproject.toml");
+  if (fs.existsSync(pyprojectPath)) {
+    try {
+      const content = fs.readFileSync(pyprojectPath, "utf8");
+      if (/^\s*\[tool\.pyrefly(?:\.|\])/m.test(content)) {
+        return true;
+      }
+    } catch {
+      // Ignore unreadable pyproject.toml
+    }
+  }
+  return false;
+}
+
+export function findPyrefly(targetRoot, baseEnv = process.env) {
   const venvPyrefly = path.join(targetRoot, ".venv", "bin", "pyrefly");
   if (isExecutableFile(venvPyrefly)) {
     return venvPyrefly;
   }
-  const whichPyrefly = findInPath("pyrefly", targetRoot);
-  if (whichPyrefly) {
-    return whichPyrefly;
+  if (!isPyreflyConfigured(targetRoot)) {
+    return null;
   }
-  const extRoot = path.join(os.homedir(), ".antigravity-ide", "extensions");
-  if (fs.existsSync(extRoot) && fs.statSync(extRoot).isDirectory()) {
-    const dirs = fs
-      .readdirSync(extRoot)
-      .filter((d) => d.startsWith("meta.pyrefly-"))
-      .sort()
-      .reverse();
-    for (const d of dirs) {
-      const candidate = path.join(extRoot, d, "bin", "pyrefly");
-      if (isExecutableFile(candidate)) {
-        return candidate;
-      }
-    }
-  }
-  return null;
+  return findInPath("pyrefly", targetRoot, baseEnv);
+}
+
+function buildGitIsolatedEnv(targetRoot, baseEnv = process.env) {
+  return {
+    ...baseEnv,
+    GIT_CEILING_DIRECTORIES: path.dirname(path.resolve(targetRoot)),
+  };
 }
 
 /**
- * PROP-10: Collect incrementally modified/added files from Git (`--staged` or `HEAD`).
+ * Collect both surviving changed files (`existingChangedFiles`, for per-file linters/formatters)
+ * and all touched paths including deletions (`allTouchedPaths`, `--diff-filter=ACMRD`, for cross-file typecheckers).
  * Returns `null` if `targetRoot` is not a Git repository.
  */
-export function getChangedFiles(targetRoot = process.cwd(), { staged = false } = {}) {
+export function getWorkspaceChanges(targetRoot = process.cwd(), { staged = false } = {}) {
   if (!fs.existsSync(path.join(targetRoot, ".git"))) {
     return null;
   }
-  const files = new Set();
+  const gitEnv = buildGitIsolatedEnv(targetRoot);
+  const allTouched = new Set();
+  const existingFiles = new Set();
+
   const addFromZ = (stdout) => {
     if (!stdout) return;
     for (const f of stdout.split("\0")) {
       if (!f) continue;
       const rel = f.split(path.sep).join("/");
+      allTouched.add(rel);
       const abs = path.join(targetRoot, rel);
-      if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
-        files.add(rel);
+      try {
+        if (fs.existsSync(abs) && fs.statSync(abs).isFile()) {
+          existingFiles.add(rel);
+        }
+      } catch {
+        // Ignore transient stat failure
       }
     }
   };
@@ -123,36 +160,39 @@ export function getChangedFiles(targetRoot = process.cwd(), { staged = false } =
   if (staged) {
     const cached = spawnSync(
       "git",
-      ["-c", "core.quotePath=false", "diff", "--name-only", "--cached", "--diff-filter=ACMR", "-z"],
-      { cwd: targetRoot, encoding: "utf8", timeout: 5000 }
+      ["-c", "core.quotePath=false", "diff", "--name-only", "--cached", "--diff-filter=ACMRD", "-z"],
+      { cwd: targetRoot, encoding: "utf8", timeout: 5000, env: gitEnv }
     );
     if (cached.status === 0) {
       addFromZ(cached.stdout);
-      return [...files];
+      return {
+        existingChangedFiles: [...existingFiles],
+        allTouchedPaths: [...allTouched],
+      };
     }
     return null;
   }
 
   const headDiff = spawnSync(
     "git",
-    ["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=ACMR", "HEAD", "-z"],
-    { cwd: targetRoot, encoding: "utf8", timeout: 5000 }
+    ["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=ACMRD", "HEAD", "-z"],
+    { cwd: targetRoot, encoding: "utf8", timeout: 5000, env: gitEnv }
   );
   if (headDiff.status === 0) {
     addFromZ(headDiff.stdout);
   }
   const worktreeDiff = spawnSync(
     "git",
-    ["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=ACMR", "-z"],
-    { cwd: targetRoot, encoding: "utf8", timeout: 5000 }
+    ["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=ACMRD", "-z"],
+    { cwd: targetRoot, encoding: "utf8", timeout: 5000, env: gitEnv }
   );
   if (worktreeDiff.status === 0) {
     addFromZ(worktreeDiff.stdout);
   }
   const cachedDiff = spawnSync(
     "git",
-    ["-c", "core.quotePath=false", "diff", "--name-only", "--cached", "--diff-filter=ACMR", "-z"],
-    { cwd: targetRoot, encoding: "utf8", timeout: 5000 }
+    ["-c", "core.quotePath=false", "diff", "--name-only", "--cached", "--diff-filter=ACMRD", "-z"],
+    { cwd: targetRoot, encoding: "utf8", timeout: 5000, env: gitEnv }
   );
   if (cachedDiff.status === 0) {
     addFromZ(cachedDiff.stdout);
@@ -160,12 +200,294 @@ export function getChangedFiles(targetRoot = process.cwd(), { staged = false } =
   const untracked = spawnSync(
     "git",
     ["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "-z"],
-    { cwd: targetRoot, encoding: "utf8", timeout: 5000 }
+    { cwd: targetRoot, encoding: "utf8", timeout: 5000, env: gitEnv }
   );
   if (untracked.status === 0) {
     addFromZ(untracked.stdout);
   }
-  return [...files];
+  return {
+    existingChangedFiles: [...existingFiles],
+    allTouchedPaths: [...allTouched],
+  };
+}
+
+/**
+ * PROP-10: Collect incrementally modified/added existing files from Git (`--staged` or `HEAD`).
+ * Returns `null` if `targetRoot` is not a Git repository.
+ */
+export function getChangedFiles(targetRoot = process.cwd(), { staged = false } = {}) {
+  const changes = getWorkspaceChanges(targetRoot, { staged });
+  return changes ? changes.existingChangedFiles : null;
+}
+
+const VERIFY_CACHE_FILENAME = "harness-verify-cache.json";
+const MAX_CACHED_DIGESTS = 32;
+
+export function resolveGitDir(targetRoot = process.cwd()) {
+  if (!fs.existsSync(path.join(targetRoot, ".git"))) {
+    return null;
+  }
+  try {
+    const proc = spawnSync("git", ["rev-parse", "--git-dir"], {
+      cwd: targetRoot,
+      encoding: "utf8",
+      timeout: 5000,
+      env: buildGitIsolatedEnv(targetRoot),
+    });
+    if (proc.status === 0 && proc.stdout && proc.stdout.trim()) {
+      return path.resolve(targetRoot, proc.stdout.trim());
+    }
+  } catch {
+    // Ignore git resolution errors
+  }
+  return null;
+}
+
+export function loadVerifyCache(targetRoot = process.cwd()) {
+  const empty = {
+    schemaVersion: 1,
+    doctorDigests: [],
+    fullDigests: [],
+    stopCursors: {},
+  };
+  const gitDir = resolveGitDir(targetRoot);
+  if (!gitDir) return empty;
+  const cachePath = path.join(gitDir, VERIFY_CACHE_FILENAME);
+  try {
+    if (!fs.existsSync(cachePath)) return empty;
+    const parsed = JSON.parse(fs.readFileSync(cachePath, "utf8"));
+    if (!parsed || typeof parsed !== "object" || parsed.schemaVersion !== 1) {
+      return empty;
+    }
+    return {
+      schemaVersion: 1,
+      doctorDigests: Array.isArray(parsed.doctorDigests) ? parsed.doctorDigests : [],
+      fullDigests: Array.isArray(parsed.fullDigests) ? parsed.fullDigests : [],
+      stopCursors:
+        parsed.stopCursors && typeof parsed.stopCursors === "object"
+          ? parsed.stopCursors
+          : {},
+    };
+  } catch {
+    return empty;
+  }
+}
+
+export function saveVerifyCache(targetRoot = process.cwd(), cacheState) {
+  const gitDir = resolveGitDir(targetRoot);
+  if (!gitDir || !fs.existsSync(gitDir)) return false;
+  const cachePath = path.join(gitDir, VERIFY_CACHE_FILENAME);
+  const tmpPath = `${cachePath}.${process.pid}.tmp`;
+  const normalized = {
+    schemaVersion: 1,
+    updatedAt: new Date().toISOString(),
+    doctorDigests: [...new Set(cacheState.doctorDigests || [])].slice(-MAX_CACHED_DIGESTS),
+    fullDigests: [...new Set(cacheState.fullDigests || [])].slice(-MAX_CACHED_DIGESTS),
+    stopCursors: cacheState.stopCursors || {},
+  };
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(normalized, null, 2) + "\n", "utf8");
+    fs.renameSync(tmpPath, cachePath);
+    return true;
+  } catch {
+    try {
+      fs.rmSync(tmpPath, { force: true });
+    } catch {
+      // Ignore cleanup failure
+    }
+    return false;
+  }
+}
+
+function sha256Hex(data) {
+  return crypto.createHash("sha256").update(data).digest("hex");
+}
+
+function computeCliSalt(targetRoot) {
+  const hash = crypto.createHash("sha256");
+  hash.update(`v1\0${CLI_PACKAGE_VERSION}\0`);
+  hash.update(process.env.HARNESS_ALLOW_PROTECTED === "1" ? "allow-protected\0" : "strict\0");
+  const harnessJsonPath = path.join(targetRoot, ".agents", "harness.json");
+  try {
+    if (fs.existsSync(harnessJsonPath) && fs.statSync(harnessJsonPath).isFile()) {
+      hash.update(fs.readFileSync(harnessJsonPath));
+    }
+  } catch {
+    // Ignore
+  }
+  return hash.digest("hex");
+}
+
+function computeDigestFromTreeAndEntries(targetRoot, cliSalt, treeOid, statusMap) {
+  const sortedPaths = [...statusMap.keys()].sort();
+  const hash = crypto.createHash("sha256");
+  hash.update(`${cliSalt}\n${treeOid}\n`);
+  for (const rel of sortedPaths) {
+    const xy = statusMap.get(rel) || "";
+    const abs = path.join(targetRoot, rel);
+    try {
+      const st = fs.lstatSync(abs);
+      if (st.isSymbolicLink()) {
+        hash.update(`${rel}\0${xy}\0L\0${fs.readlinkSync(abs)}\n`);
+      } else if (st.isFile()) {
+        const fileHash = sha256Hex(fs.readFileSync(abs));
+        hash.update(`${rel}\0${xy}\0F\0${fileHash}\n`);
+      } else {
+        hash.update(`${rel}\0${xy}\0O\n`);
+      }
+    } catch {
+      hash.update(`${rel}\0${xy}\0D\n`);
+    }
+  }
+  return hash.digest("hex");
+}
+
+function parsePorcelainZEntries(stdout) {
+  const entries = new Map();
+  if (!stdout) return entries;
+  const parts = stdout.split("\0");
+  for (let i = 0; i < parts.length; i++) {
+    const entry = parts[i];
+    if (!entry || entry.length < 4) continue;
+    const xy = entry.slice(0, 2);
+    const x = entry[0];
+    const y = entry[1];
+    const relPath = entry.slice(3).split(path.sep).join("/");
+    if (relPath) entries.set(relPath, xy);
+    if (x === "R" || x === "C" || y === "R" || y === "C") {
+      const origPath = parts[i + 1];
+      if (origPath) {
+        entries.set(origPath.split(path.sep).join("/"), `${xy}:orig`);
+      }
+      i += 1;
+    }
+  }
+  return entries;
+}
+
+export function computeWorkspaceDigest(targetRoot = process.cwd()) {
+  if (!fs.existsSync(path.join(targetRoot, ".git"))) {
+    return null;
+  }
+  const gitEnv = buildGitIsolatedEnv(targetRoot);
+  const treeProc = spawnSync("git", ["rev-parse", "--verify", "HEAD^{tree}"], {
+    cwd: targetRoot,
+    encoding: "utf8",
+    timeout: 5000,
+    env: gitEnv,
+  });
+  const headTree =
+    treeProc.status === 0 && treeProc.stdout && treeProc.stdout.trim()
+      ? treeProc.stdout.trim()
+      : "UNBORN";
+
+  const statusProc = spawnSync(
+    "git",
+    ["-c", "core.quotePath=false", "status", "--porcelain=v1", "-z", "-uall"],
+    { cwd: targetRoot, encoding: "utf8", timeout: 5000, env: gitEnv }
+  );
+  if (statusProc.status !== 0) {
+    return null;
+  }
+  const statusEntries = parsePorcelainZEntries(statusProc.stdout || "");
+  const cliSalt = computeCliSalt(targetRoot);
+  const digest = computeDigestFromTreeAndEntries(
+    targetRoot,
+    cliSalt,
+    headTree,
+    statusEntries
+  );
+  return {
+    cliSalt,
+    headTree,
+    changedPaths: [...statusEntries.keys()],
+    digest,
+  };
+}
+
+export function computePreSignedNextCommitDigest(targetRoot = process.cwd(), cliSaltInput = null) {
+  if (!fs.existsSync(path.join(targetRoot, ".git"))) {
+    return null;
+  }
+  const gitEnv = buildGitIsolatedEnv(targetRoot);
+  // Only pre-sign next HEAD tree if there are NO unstaged tracked edits/deletions
+  const unstagedProc = spawnSync(
+    "git",
+    ["-c", "core.quotePath=false", "diff", "--name-only", "--diff-filter=ACMRD", "-z"],
+    { cwd: targetRoot, encoding: "utf8", timeout: 5000, env: gitEnv }
+  );
+  if (unstagedProc.status !== 0 || (unstagedProc.stdout && unstagedProc.stdout.length > 0)) {
+    return null;
+  }
+
+  const writeTreeProc = spawnSync("git", ["write-tree"], {
+    cwd: targetRoot,
+    encoding: "utf8",
+    timeout: 5000,
+    env: gitEnv,
+  });
+  const nextTreeOid =
+    writeTreeProc.status === 0 && writeTreeProc.stdout ? writeTreeProc.stdout.trim() : "";
+  if (!nextTreeOid) {
+    return null;
+  }
+
+  const untrackedProc = spawnSync(
+    "git",
+    ["-c", "core.quotePath=false", "ls-files", "--others", "--exclude-standard", "-z"],
+    { cwd: targetRoot, encoding: "utf8", timeout: 5000, env: gitEnv }
+  );
+  if (untrackedProc.status !== 0) {
+    return null;
+  }
+  const untrackedEntries = new Map();
+  for (const raw of (untrackedProc.stdout || "").split("\0")) {
+    if (!raw) continue;
+    untrackedEntries.set(raw.split(path.sep).join("/"), "??");
+  }
+
+  const cliSalt = cliSaltInput || computeCliSalt(targetRoot);
+  return {
+    digest: computeDigestFromTreeAndEntries(
+      targetRoot,
+      cliSalt,
+      nextTreeOid,
+      untrackedEntries
+    ),
+    hasUntracked: untrackedEntries.size > 0,
+  };
+}
+
+export function computeTranscriptCursorSnapshot(transcriptPath) {
+  if (typeof transcriptPath !== "string" || !transcriptPath.trim()) {
+    return null;
+  }
+  const resolved = path.resolve(transcriptPath.trim());
+  if (!fs.existsSync(resolved)) {
+    return null;
+  }
+  try {
+    const rawLines = fs
+      .readFileSync(resolved, "utf8")
+      .split(/\r?\n/)
+      .filter((line) => line.trim());
+    if (rawLines.length === 0) return null;
+    const steps = rawLines.map((line) => JSON.parse(line));
+    const lastStep = steps[steps.length - 1];
+    const lastPassedStepIndex =
+      lastStep && typeof lastStep.step_index === "number"
+        ? lastStep.step_index
+        : steps.length - 1;
+    return {
+      key: resolved,
+      entry: {
+        lastPassedStepIndex,
+        stepAnchor: sha256Hex(JSON.stringify(lastStep)),
+      },
+    };
+  } catch {
+    return null;
+  }
 }
 
 const PURE_READONLY_COMMANDS = new Set([
@@ -312,7 +634,52 @@ const READONLY_TOOL_NAMES = new Set([
   "search_marketplace",
   "list_plugin_accounts",
   "ask_question",
+  "send_message",
+  "schedule",
+  "define_subagent",
 ]);
+
+const SHELL_WRAPPERS = new Set(["sh", "bash", "zsh", "dash", "ksh"]);
+
+function extractShellDashCScript(bin, args) {
+  if (!SHELL_WRAPPERS.has(bin)) return null;
+  let i = 0;
+  while (i < args.length) {
+    const arg = args[i];
+    if (arg === "-o" || arg === "+o") {
+      if (i + 1 >= args.length) return null;
+      i += 2;
+      continue;
+    }
+    if (
+      arg === "--norc" ||
+      arg === "--noprofile" ||
+      arg === "--no-rcs" ||
+      arg === "--no-globalrcs"
+    ) {
+      i += 1;
+      continue;
+    }
+    if (/^-[A-Za-z]+$/.test(arg)) {
+      const flags = arg.slice(1);
+      for (const ch of flags) {
+        if (!"cleuxvf".includes(ch)) {
+          return null;
+        }
+      }
+      if (flags.includes("c")) {
+        if (i + 1 >= args.length || typeof args[i + 1] !== "string") {
+          return null;
+        }
+        return args[i + 1];
+      }
+      i += 1;
+      continue;
+    }
+    return null;
+  }
+  return null;
+}
 
 export function unwrapTranscriptString(val) {
   if (typeof val !== "string") return "";
@@ -631,6 +998,15 @@ export function isReadOnlyShellCommand(rawCommandLine, depth = 0) {
   if (leadingWatchMatch && leadingWatchMatch[1]) {
     cmdLine = leadingWatchMatch[1].trim();
     if (!cmdLine) return false;
+    if (
+      (cmdLine.startsWith("'") || cmdLine.startsWith('"')) &&
+      splitShellSegments(cmdLine).length === 1
+    ) {
+      const singleArgTokens = tokenizeShellSegment(cmdLine);
+      if (singleArgTokens.length === 1) {
+        return isReadOnlyShellCommand(singleArgTokens[0], depth + 1);
+      }
+    }
   }
 
   // Check and neutralize $(...) command substitutions outside single quotes
@@ -723,6 +1099,35 @@ export function isReadOnlyShellCommand(rawCommandLine, depth = 0) {
 
     const bin = path.basename(tokens[0]);
     const args = tokens.slice(1);
+
+    const innerShellScript = extractShellDashCScript(bin, args);
+    if (innerShellScript !== null) {
+      if (!isReadOnlyShellCommand(innerShellScript, depth + 1)) {
+        return false;
+      }
+      continue;
+    }
+
+    if (bin === ":" || bin === "export") {
+      continue;
+    }
+    if (bin === "set") {
+      let validSet = true;
+      for (let idx = 0; idx < args.length; idx++) {
+        const a = args[idx];
+        if (a === "-o" || a === "+o") {
+          idx += 1;
+          continue;
+        }
+        if (/^[-+][euoxvf]+$/.test(a)) {
+          continue;
+        }
+        validSet = false;
+        break;
+      }
+      if (!validSet) return false;
+      continue;
+    }
 
     if (PURE_READONLY_COMMANDS.has(bin)) {
       continue;
@@ -876,6 +1281,14 @@ export function isReadOnlyToolCall(toolCall) {
     const action = unwrapTranscriptString(String(args.Action || ""));
     return action === "list" || action === "status";
   }
+  if (name === "invoke_subagent") {
+    const typeName = unwrapTranscriptString(String(args.TypeName ?? args.typeName ?? ""));
+    return typeName === "research";
+  }
+  if (name === "swarm") {
+    const action = unwrapTranscriptString(String(args.action ?? args.Action ?? ""));
+    return action === "status" || action === "models";
+  }
   if (name === "run_command") {
     const cmdLine = args.CommandLine ?? args.commandLine ?? "";
     return isReadOnlyShellCommand(String(cmdLine));
@@ -883,7 +1296,7 @@ export function isReadOnlyToolCall(toolCall) {
   return false;
 }
 
-export function isReadOnlyAgentTurn(payload) {
+export function isReadOnlyAgentTurn(payload, options = {}) {
   if (!payload || typeof payload !== "object") return false;
 
   if (payload.toolCall && typeof payload.toolCall === "object") {
@@ -915,7 +1328,38 @@ export function isReadOnlyAgentTurn(payload) {
     }
   }
 
-  const turnSteps = lastUserInputIdx >= 0 ? steps.slice(lastUserInputIdx + 1) : steps;
+  let sliceStartIdx = lastUserInputIdx >= 0 ? lastUserInputIdx + 1 : 0;
+  const cacheState = options.cacheState;
+  const resolvedTranscript = path.resolve(transcriptPath);
+  const cursorEntry =
+    cacheState &&
+    cacheState.stopCursors &&
+    typeof cacheState.stopCursors === "object"
+      ? cacheState.stopCursors[resolvedTranscript]
+      : null;
+
+  if (
+    cursorEntry &&
+    typeof cursorEntry.lastPassedStepIndex === "number" &&
+    typeof cursorEntry.stepAnchor === "string"
+  ) {
+    let anchorIdx = -1;
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const s = steps[i];
+      const sIdx = s && typeof s.step_index === "number" ? s.step_index : i;
+      if (sIdx === cursorEntry.lastPassedStepIndex) {
+        if (sha256Hex(JSON.stringify(s)) === cursorEntry.stepAnchor) {
+          anchorIdx = i;
+        }
+        break;
+      }
+    }
+    if (anchorIdx >= 0 && anchorIdx + 1 > sliceStartIdx) {
+      sliceStartIdx = anchorIdx + 1;
+    }
+  }
+
+  const turnSteps = steps.slice(sliceStartIdx);
 
   // If any step in turnSteps had truncated tool_calls, attempt to load transcript_full.jsonl
   let fullByStepIndex = null;

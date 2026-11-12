@@ -9,7 +9,7 @@
   },
   "scripts": {
     "doctor": "node ./bin/harness.js doctor",
-    "test": "node ./tests/harness.test.js && node --test tests/hook_preservation.test.js && node --test tests/branch_cleanup.test.js && node --test tests/readonly_hook.test.js && node --test tests/watchdog.test.js"
+    "test": "node ./tests/harness.test.js && node --test tests/hook_preservation.test.js && node --test tests/branch_cleanup.test.js && node --test tests/readonly_hook.test.js && node --test tests/watchdog.test.js && node --test tests/hook_dedup.test.js"
   },
   "files": [
     "bin/",
