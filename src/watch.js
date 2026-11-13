@@ -12,6 +12,7 @@ function isRegularFileStdin() {
 
 export const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5m (300s)
 export const DEFAULT_MAX_REPEAT = 100;
+export const DEFAULT_REDRAW_THROTTLE_MS = 10 * 1000; // 10s
 const SIGNAL_GRACE_MS = 500;
 const HOST_SIGNAL_EXIT_CODES = {
   SIGHUP: 129,
@@ -176,9 +177,11 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
     outerStderrIsTty = Boolean(process.stderr.isTTY),
     outerColumns = process.stdout.columns || process.stderr.columns || 0,
     outerRows = process.stdout.rows || process.stderr.rows || 0,
+    redrawThrottleMs: rawRedrawThrottleMs,
     onStdoutChunk,
     onStderrChunk,
   } = options;
+  const redrawThrottleMs = rawRedrawThrottleMs ?? DEFAULT_REDRAW_THROTTLE_MS;
 
   const childEnv = resolveChildTerminalEnv(env, {
     tty,
@@ -202,10 +205,52 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
     let repeatCount = 0;
     let stdoutPartial = "";
     let stderrPartial = "";
-    const coalesceStdoutRedraws = Boolean(!noTty && tty && !outerStdoutIsTty);
-    const coalesceStderrRedraws = Boolean(!noTty && tty && !outerStderrIsTty);
-    let lastStdoutRedrawKey = null;
-    let lastStderrRedrawKey = null;
+
+    const emitRawStdout = (buf) => {
+      process.stdout.write(buf);
+      if (onStdoutChunk) onStdoutChunk(buf);
+    };
+    const emitRawStderr = (buf) => {
+      process.stderr.write(buf);
+      if (onStderrChunk) onStderrChunk(buf);
+    };
+
+    const createRedrawState = (enabled, writeFn) => ({
+      enabled,
+      writeFn,
+      lastKey: null,
+      lastEmittedAt: 0,
+      pendingChunk: null,
+      pendingKey: null,
+    });
+
+    const stdoutRedraw = createRedrawState(
+      Boolean(!noTty && tty && !outerStdoutIsTty),
+      emitRawStdout
+    );
+    const stderrRedraw = createRedrawState(
+      Boolean(!noTty && tty && !outerStderrIsTty),
+      emitRawStderr
+    );
+
+    const flushPendingRedraw = (state, now = Date.now()) => {
+      if (!state.pendingChunk) return;
+      const chunkToWrite = state.pendingChunk;
+      const keyToWrite = state.pendingKey;
+      state.pendingChunk = null;
+      state.pendingKey = null;
+      if (keyToWrite !== null && keyToWrite === state.lastKey) {
+        return;
+      }
+      state.lastKey = keyToWrite;
+      state.lastEmittedAt = now;
+      state.writeFn(chunkToWrite);
+    };
+
+    const flushAllPendingRedraws = (now = Date.now()) => {
+      flushPendingRedraw(stdoutRedraw, now);
+      flushPendingRedraw(stderrRedraw, now);
+    };
 
     const stdinOption = isRegularFileStdin() ? 0 : "ignore";
     const shellOption =
@@ -248,6 +293,7 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
         signalProcessGroup(child, sig);
 
         if (!child.pid || (childClosed && !isProcessGroupAlive(child.pid))) {
+          flushAllPendingRedraws();
           finish({ exitCode: signalExitCode, watchdogTriggered: null });
           return;
         }
@@ -260,11 +306,13 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
         reapTimer = setInterval(() => {
           if (settled) return;
           if (childClosed && !isProcessGroupAlive(child.pid)) {
+            flushAllPendingRedraws();
             finish({ exitCode: signalExitCode, watchdogTriggered: null });
             return;
           }
           if (Date.now() - signalReceivedAt >= SIGNAL_GRACE_MS + 300) {
             signalProcessGroup(child, "SIGKILL");
+            flushAllPendingRedraws();
             finish({ exitCode: signalExitCode, watchdogTriggered: null });
           }
         }, 20);
@@ -276,11 +324,9 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
     const emitWatchdogError = (code, detail) => {
       if (settled || forwardedSignal) return;
       watchdogTriggered = code;
+      flushAllPendingRedraws();
       const msg = `\n[harness-watchdog] ${code}: ${detail}\n`;
-      process.stderr.write(msg);
-      if (onStderrChunk) {
-        onStderrChunk(Buffer.from(msg, "utf8"));
-      }
+      emitRawStderr(Buffer.from(msg, "utf8"));
       killProcessGroup(child);
       finish({ exitCode: 124, watchdogTriggered });
     };
@@ -333,34 +379,49 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
       }
     };
 
-    const shouldEmitStreamChunk = (text, isStderr) => {
-      const coalesce = isStderr ? coalesceStderrRedraws : coalesceStdoutRedraws;
-      if (!coalesce) return true;
+    const handleStreamChunk = (chunk, text, state, now = Date.now()) => {
+      if (!state.enabled) {
+        state.writeFn(chunk);
+        return;
+      }
+
+      const visibleKey = text
+        .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+        .replace(/\r/g, "")
+        .trim();
 
       if (IN_PLACE_REDRAW_CHUNK_RE.test(text)) {
-        const visibleKey = text
-          .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
-          .replace(/\r/g, "")
-          .trim();
-        if (!visibleKey) return true;
-        const lastKey = isStderr ? lastStderrRedrawKey : lastStdoutRedrawKey;
-        if (visibleKey === lastKey) {
-          return false;
+        if (!visibleKey) {
+          state.writeFn(chunk);
+          return;
         }
-        if (isStderr) {
-          lastStderrRedrawKey = visibleKey;
-        } else {
-          lastStdoutRedrawKey = visibleKey;
+        if (visibleKey === state.lastKey) {
+          state.pendingChunk = null;
+          state.pendingKey = null;
+          return;
         }
-        return true;
+        if (
+          state.lastEmittedAt === 0 ||
+          redrawThrottleMs <= 0 ||
+          now - state.lastEmittedAt >= redrawThrottleMs
+        ) {
+          state.pendingChunk = null;
+          state.pendingKey = null;
+          state.lastKey = visibleKey;
+          state.lastEmittedAt = now;
+          state.writeFn(chunk);
+          return;
+        }
+        state.pendingChunk = chunk;
+        state.pendingKey = visibleKey;
+        return;
       }
 
-      if (isStderr) {
-        lastStderrRedrawKey = null;
-      } else {
-        lastStdoutRedrawKey = null;
+      flushPendingRedraw(state, now);
+      if (visibleKey) {
+        state.lastKey = visibleKey;
       }
-      return true;
+      state.writeFn(chunk);
     };
 
     const pollIntervalMs = Math.max(
@@ -388,32 +449,28 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
 
     child.stdout.on("data", (chunk) => {
       if (settled) return;
-      lastActivityAt = Date.now();
+      const now = Date.now();
+      lastActivityAt = now;
       const text = chunk.toString("utf8");
-      if (shouldEmitStreamChunk(text, false)) {
-        process.stdout.write(chunk);
-        if (onStdoutChunk) onStdoutChunk(chunk);
-      }
+      handleStreamChunk(chunk, text, stdoutRedraw, now);
       inspectLines(text, false);
     });
 
     child.stderr.on("data", (chunk) => {
       if (settled) return;
-      lastActivityAt = Date.now();
+      const now = Date.now();
+      lastActivityAt = now;
       const text = chunk.toString("utf8");
-      if (shouldEmitStreamChunk(text, true)) {
-        process.stderr.write(chunk);
-        if (onStderrChunk) onStderrChunk(chunk);
-      }
+      handleStreamChunk(chunk, text, stderrRedraw, now);
       inspectLines(text, true);
     });
 
     child.on("error", (err) => {
       childClosed = true;
       if (settled) return;
+      flushAllPendingRedraws();
       const msg = `[harness-watchdog] Failed to start command: ${err.message}\n`;
-      process.stderr.write(msg);
-      if (onStderrChunk) onStderrChunk(Buffer.from(msg, "utf8"));
+      emitRawStderr(Buffer.from(msg, "utf8"));
       finish({ exitCode: 127, watchdogTriggered: null });
     });
 
@@ -423,10 +480,12 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
       if (forwardedSignal) {
         const signalExitCode = HOST_SIGNAL_EXIT_CODES[forwardedSignal];
         if (!child.pid || !isProcessGroupAlive(child.pid)) {
+          flushAllPendingRedraws();
           finish({ exitCode: signalExitCode, watchdogTriggered: null });
         }
         return;
       }
+      flushAllPendingRedraws();
       finish({ exitCode: code ?? 1, watchdogTriggered: null });
     });
   });

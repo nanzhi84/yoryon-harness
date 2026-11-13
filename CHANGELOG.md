@@ -5,7 +5,7 @@
 ## [Unreleased]
 
 ### Added
-- `harness watch` 与 `harness run` 新增 `--tty` / `--no-tty` 终端兼容开关及外层真实非 `dumb` 终端自动透传（[src/watch.js](src/watch.js)、[src/run.js](src/run.js)、[bin/harness.js](bin/harness.js)）：外层具备真终端且非 `dumb`/`unknown` 时自动向子进程注入 `TTY_COMPATIBLE=1`、`COLUMNS` 与 `LINES`；显式传入 `--tty` 时补齐 `FORCE_COLOR=1`、`CLICOLOR_FORCE=1` 与兜底 `TERM=xterm-256color`，保持 `stdout`/`stderr` 严格分流，并在外层为非终端管道时自动对连续相同的原地重绘帧进行去重节流。
+- `harness watch` 与 `harness run` 新增 `--tty` / `--no-tty` 终端兼容开关及外层真实非 `dumb` 终端自动透传（[src/watch.js](src/watch.js)、[src/run.js](src/run.js)、[bin/harness.js](bin/harness.js)）：外层具备真终端且非 `dumb`/`unknown` 时自动向子进程注入 `TTY_COMPATIBLE=1`、`COLUMNS` 与 `LINES`；显式传入 `--tty` 时补齐 `FORCE_COLOR=1`、`CLICOLOR_FORCE=1` 与兜底 `TERM=xterm-256color`，保持 `stdout`/`stderr` 严格分流，并在外层为非终端管道时自动对连续相同原地重绘帧进行内容去重及 `DEFAULT_REDRAW_THROTTLE_MS`（10 秒）时间窗口节流，同时在普通非重绘输出前与子进程结束时补刷最后一帧。
 
 ### Fixed
 - 修复 [src/watch.js](src/watch.js) `inspectLines` 仅按 `\r?\n` 切分导致裸 `\r` 进度条累积 `partial` 缓冲、以及原地重绘进度帧（裸 `\r` 或含 ANSI 光标控制序列）被误判为 `LOOP_DETECTED` 熔断的问题，同时保留带 SGR 颜色码错误日志的死循环熔断能力。

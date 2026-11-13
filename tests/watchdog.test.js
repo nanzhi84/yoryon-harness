@@ -754,4 +754,77 @@ describe("TestWatchdogTerminalAndProgress", () => {
     assert.equal(occurrences, 1, `Expected 1 occurrence of Initializing panel, got ${occurrences}: ${res.stderr}`);
     assert.equal(res.stderr.includes("Completed 5/5"), true);
   });
+
+  it("test_tty_flag_over_non_tty_pipe_throttles_rapid_timer_redraws_and_flushes_final_frame", () => {
+    const script = [
+      "let tick = 0;",
+      "const timer = setInterval(() => {",
+      "  tick += 1;",
+      "  if (tick < 10) {",
+      '    process.stderr.write(`\\r\\x1b[2K\\x1b[1A\\x1b[2KPanel running 00:00:0${tick} | ${tick}/10`);',
+      "    return;",
+      "  }",
+      "  clearInterval(timer);",
+      '  process.stderr.write("\\r\\x1b[2K\\x1b[1A\\x1b[2KPanel complete 00:00:10 | 10/10\\n");',
+      '  process.stdout.write(\'{"done":10}\\n\');',
+      "  process.exit(0);",
+      "}, 25);",
+    ].join(" ");
+
+    const res = spawnSync(
+      process.execPath,
+      [CLI_BIN, "watch", "--tty", "--timeout", "5s", "--", process.execPath, "-e", script],
+      {
+        cwd: ROOT,
+        encoding: "utf8",
+        timeout: 15000,
+      }
+    );
+
+    assert.equal(res.error, undefined);
+    assert.equal(res.status, 0, res.stderr);
+    assert.deepEqual(JSON.parse(res.stdout), { done: 10 });
+    assert.equal(res.stderr.includes("00:00:01 | 1/10"), true, res.stderr);
+    assert.equal(res.stderr.includes("Panel complete 00:00:10 | 10/10"), true, res.stderr);
+    for (let i = 2; i <= 9; i += 1) {
+      assert.equal(res.stderr.includes(`00:00:0${i}`), false, `Unexpected intermediate frame 00:00:0${i}: ${res.stderr}`);
+    }
+    const panelOccurrences = res.stderr.split("Panel ").length - 1;
+    assert.equal(panelOccurrences, 2, `Expected 2 Panel occurrences, got ${panelOccurrences}: ${res.stderr}`);
+  });
+
+  it("test_tty_redraw_throttle_emits_periodic_update_after_cooldown_and_before_plain_log", async () => {
+    const script = [
+      'process.stderr.write("\\r\\x1b[2KTick 1");',
+      'setTimeout(() => process.stderr.write("\\r\\x1b[2KTick 2"), 50);',
+      'setTimeout(() => process.stderr.write("\\r\\x1b[2KTick 3"), 100);',
+      'setTimeout(() => process.stderr.write("\\r\\x1b[2KTick 4"), 220);',
+      'setTimeout(() => process.stderr.write("\\r\\x1b[2KTick 5"), 270);',
+      'setTimeout(() => { process.stderr.write("Plain milestone log\\n"); process.exit(0); }, 310);',
+    ].join(" ");
+
+    let stderr = "";
+    const res = await runWatchedProcess(ROOT, [process.execPath, "-e", script], {
+      wallTimeoutMs: 5000,
+      tty: true,
+      outerStdoutIsTty: false,
+      outerStderrIsTty: false,
+      redrawThrottleMs: 180,
+      onStderrChunk: (chunk) => {
+        stderr += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+      },
+    });
+
+    assert.equal(res.exitCode, 0);
+    assert.equal(stderr.includes("Tick 1"), true, stderr);
+    assert.equal(stderr.includes("Tick 2"), false, stderr);
+    assert.equal(stderr.includes("Tick 3"), false, stderr);
+    assert.equal(stderr.includes("Tick 4"), true, stderr);
+    assert.equal(stderr.includes("Tick 5"), true, stderr);
+    assert.equal(stderr.includes("Plain milestone log"), true, stderr);
+    assert.ok(
+      stderr.indexOf("Tick 5") < stderr.indexOf("Plain milestone log"),
+      `Expected Tick 5 before Plain milestone log in: ${stderr}`
+    );
+  });
 });
