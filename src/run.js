@@ -3,7 +3,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { cleanSandboxes, ensureWorktreeSharedPaths } from "./clean.js";
 import { buildNormalizedEnv } from "./hook-tools.js";
-import { runWatchedProcess } from "./watch.js";
+import { resolveChildTerminalEnv, runWatchedProcess } from "./watch.js";
 
 function formatTimestamp(date = new Date()) {
   const pad = (n) => String(n).padStart(2, "0");
@@ -83,9 +83,13 @@ export async function runSandboxTask(targetRoot, taskName, cmdArgs, watchOptions
     watchdogTriggered = res.watchdogTriggered;
   } else {
     exitCode = await new Promise((resolve) => {
+      const childEnv = resolveChildTerminalEnv(env, {
+        tty: Boolean(watchOptions && watchOptions.tty),
+        noTty: Boolean(watchOptions && watchOptions.noTty),
+      });
       const child = spawn(cmdArgs[0], cmdArgs.slice(1), {
         cwd: targetRoot,
-        env,
+        env: childEnv,
         shell: cmdArgs.length === 1,
         stdio: ["inherit", "pipe", "pipe"],
       });

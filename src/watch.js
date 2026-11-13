@@ -18,6 +18,61 @@ const HOST_SIGNAL_EXIT_CODES = {
   SIGINT: 130,
   SIGTERM: 143,
 };
+const IN_PLACE_REDRAW_CHUNK_RE = /\r(?!\n)|\x1b\[[0-9;]*[ABCDEFGHJKfsu]/;
+const IN_PLACE_REDRAW_LINE_RE = /\x1b\[[0-9;]*[ABCDEFGHJKfsu]|\x1b\[\?[0-9;]*[hl]/;
+
+/**
+ * Resolve terminal environment variables passed to watched child processes:
+ * - Explicit `--tty`: injects `TTY_COMPATIBLE=1`, `FORCE_COLOR=1`, `CLICOLOR_FORCE=1`,
+ *   upgrades empty/dumb `TERM` to `xterm-256color`, and ensures `COLUMNS`/`LINES`.
+ * - Automatic outer TTY passthrough (when `!noTty` and outer stdout/stderr are non-dumb TTYs):
+ *   forwards `TTY_COMPATIBLE=1`, `COLUMNS`, and `LINES` unless `NO_COLOR` is set.
+ */
+export function resolveChildTerminalEnv(baseEnv, options = {}) {
+  const {
+    tty = false,
+    noTty = false,
+    outerStdoutIsTty = Boolean(process.stdout.isTTY),
+    outerStderrIsTty = Boolean(process.stderr.isTTY),
+    outerColumns = process.stdout.columns || process.stderr.columns || 0,
+    outerRows = process.stdout.rows || process.stderr.rows || 0,
+  } = options;
+
+  const childEnv = { ...(baseEnv || {}) };
+  if (noTty) {
+    return childEnv;
+  }
+
+  const rawTerm = String(childEnv.TERM || "").trim();
+  const isDumbOrEmptyTerm =
+    !rawTerm || rawTerm.toLowerCase() === "dumb" || rawTerm.toLowerCase() === "unknown";
+
+  if (tty) {
+    childEnv.TTY_COMPATIBLE = "1";
+    if (!childEnv.FORCE_COLOR) childEnv.FORCE_COLOR = "1";
+    if (!childEnv.CLICOLOR_FORCE) childEnv.CLICOLOR_FORCE = "1";
+    if (isDumbOrEmptyTerm) childEnv.TERM = "xterm-256color";
+    if (!childEnv.COLUMNS) {
+      childEnv.COLUMNS = String(outerColumns > 0 ? outerColumns : 120);
+    }
+    if (!childEnv.LINES) {
+      childEnv.LINES = String(outerRows > 0 ? outerRows : 40);
+    }
+    return childEnv;
+  }
+
+  if (outerStdoutIsTty && outerStderrIsTty && !isDumbOrEmptyTerm && !childEnv.NO_COLOR) {
+    if (!childEnv.TTY_COMPATIBLE) childEnv.TTY_COMPATIBLE = "1";
+    if (!childEnv.COLUMNS && outerColumns > 0) {
+      childEnv.COLUMNS = String(outerColumns);
+    }
+    if (!childEnv.LINES && outerRows > 0) {
+      childEnv.LINES = String(outerRows);
+    }
+  }
+
+  return childEnv;
+}
 
 /**
  * Parse human-readable duration strings like "300ms", "30s", "5m", "2h", or plain seconds "30".
@@ -115,9 +170,24 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
     idleTimeoutMs = DEFAULT_IDLE_TIMEOUT_MS,
     maxRepeat = DEFAULT_MAX_REPEAT,
     env = buildNormalizedEnv(targetRoot),
+    tty = false,
+    noTty = false,
+    outerStdoutIsTty = Boolean(process.stdout.isTTY),
+    outerStderrIsTty = Boolean(process.stderr.isTTY),
+    outerColumns = process.stdout.columns || process.stderr.columns || 0,
+    outerRows = process.stdout.rows || process.stderr.rows || 0,
     onStdoutChunk,
     onStderrChunk,
   } = options;
+
+  const childEnv = resolveChildTerminalEnv(env, {
+    tty,
+    noTty,
+    outerStdoutIsTty,
+    outerStderrIsTty,
+    outerColumns,
+    outerRows,
+  });
 
   return new Promise((resolve) => {
     let settled = false;
@@ -132,16 +202,20 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
     let repeatCount = 0;
     let stdoutPartial = "";
     let stderrPartial = "";
+    const coalesceStdoutRedraws = Boolean(!noTty && tty && !outerStdoutIsTty);
+    const coalesceStderrRedraws = Boolean(!noTty && tty && !outerStderrIsTty);
+    let lastStdoutRedrawKey = null;
+    let lastStderrRedrawKey = null;
 
     const stdinOption = isRegularFileStdin() ? 0 : "ignore";
     const shellOption =
       cmdArgs.length === 1
-        ? (env && env.SHELL) || process.env.SHELL || true
+        ? (childEnv && childEnv.SHELL) || process.env.SHELL || true
         : false;
 
     const child = spawn(cmdArgs[0], cmdArgs.slice(1), {
       cwd: targetRoot,
-      env,
+      env: childEnv,
       shell: shellOption,
       detached: true,
       stdio: [stdinOption, "pipe", "pipe"],
@@ -214,15 +288,26 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
     const inspectLines = (textChunk, isStderr = false) => {
       if (settled || forwardedSignal) return;
       const combined = (isStderr ? stderrPartial : stdoutPartial) + textChunk;
-      const parts = combined.split(/\r?\n/);
-      const remainder = parts.pop() ?? "";
-      if (isStderr) {
-        stderrPartial = remainder;
-      } else {
-        stdoutPartial = remainder;
+      let scanBody = combined;
+      let trailingCr = "";
+      if (combined.endsWith("\r")) {
+        // Keep trailing CR until next chunk so split CRLF ("\r" + "\n") is not misread as bare CR.
+        scanBody = combined.slice(0, -1);
+        trailingCr = "\r";
       }
 
-      for (const rawLine of parts) {
+      let lastIndex = 0;
+      const lineRegex = /([^\r\n]*)(\r\n|\n|\r)/g;
+      let match;
+      while ((match = lineRegex.exec(scanBody)) !== null) {
+        const rawLine = match[1];
+        const delim = match[2];
+        lastIndex = lineRegex.lastIndex;
+
+        if (delim === "\r" || IN_PLACE_REDRAW_LINE_RE.test(rawLine)) {
+          continue;
+        }
+
         const normalized = normalizeLineForRepeatCheck(rawLine);
         if (!normalized) continue;
         if (normalized === lastNormalizedLine) {
@@ -239,6 +324,43 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
           repeatCount = 1;
         }
       }
+
+      const remainder = scanBody.slice(lastIndex) + trailingCr;
+      if (isStderr) {
+        stderrPartial = remainder;
+      } else {
+        stdoutPartial = remainder;
+      }
+    };
+
+    const shouldEmitStreamChunk = (text, isStderr) => {
+      const coalesce = isStderr ? coalesceStderrRedraws : coalesceStdoutRedraws;
+      if (!coalesce) return true;
+
+      if (IN_PLACE_REDRAW_CHUNK_RE.test(text)) {
+        const visibleKey = text
+          .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "")
+          .replace(/\r/g, "")
+          .trim();
+        if (!visibleKey) return true;
+        const lastKey = isStderr ? lastStderrRedrawKey : lastStdoutRedrawKey;
+        if (visibleKey === lastKey) {
+          return false;
+        }
+        if (isStderr) {
+          lastStderrRedrawKey = visibleKey;
+        } else {
+          lastStdoutRedrawKey = visibleKey;
+        }
+        return true;
+      }
+
+      if (isStderr) {
+        lastStderrRedrawKey = null;
+      } else {
+        lastStdoutRedrawKey = null;
+      }
+      return true;
     };
 
     const pollIntervalMs = Math.max(
@@ -267,17 +389,23 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
     child.stdout.on("data", (chunk) => {
       if (settled) return;
       lastActivityAt = Date.now();
-      process.stdout.write(chunk);
-      if (onStdoutChunk) onStdoutChunk(chunk);
-      inspectLines(chunk.toString("utf8"), false);
+      const text = chunk.toString("utf8");
+      if (shouldEmitStreamChunk(text, false)) {
+        process.stdout.write(chunk);
+        if (onStdoutChunk) onStdoutChunk(chunk);
+      }
+      inspectLines(text, false);
     });
 
     child.stderr.on("data", (chunk) => {
       if (settled) return;
       lastActivityAt = Date.now();
-      process.stderr.write(chunk);
-      if (onStderrChunk) onStderrChunk(chunk);
-      inspectLines(chunk.toString("utf8"), true);
+      const text = chunk.toString("utf8");
+      if (shouldEmitStreamChunk(text, true)) {
+        process.stderr.write(chunk);
+        if (onStderrChunk) onStderrChunk(chunk);
+      }
+      inspectLines(text, true);
     });
 
     child.on("error", (err) => {
@@ -306,7 +434,7 @@ export async function runWatchedProcess(targetRoot, cmdArgs, options = {}) {
 
 /**
  * Parse `harness watch` arguments:
- * `harness watch --timeout <duration> [--idle-timeout <duration>] [--max-repeat <N>] -- <cmd> [args...]`
+ * `harness watch --timeout <duration> [--idle-timeout <duration>] [--max-repeat <N>] [--tty | --no-tty] -- <cmd> [args...]`
  */
 export function parseWatchArgs(args) {
   const sepIdx = args.indexOf("--");
@@ -316,6 +444,8 @@ export function parseWatchArgs(args) {
   let timeoutRaw = null;
   let idleTimeoutRaw = null;
   let maxRepeatRaw = null;
+  let tty = false;
+  let noTty = false;
 
   for (let i = 0; i < optionArgs.length; i++) {
     const arg = optionArgs[i];
@@ -331,6 +461,12 @@ export function parseWatchArgs(args) {
       maxRepeatRaw = optionArgs[++i];
     } else if (arg.startsWith("--max-repeat=")) {
       maxRepeatRaw = arg.slice("--max-repeat=".length);
+    } else if (arg === "--tty") {
+      tty = true;
+      noTty = false;
+    } else if (arg === "--no-tty") {
+      noTty = true;
+      tty = false;
     }
   }
 
@@ -346,18 +482,21 @@ export function parseWatchArgs(args) {
     wallTimeoutMs,
     idleTimeoutMs,
     maxRepeat,
+    tty,
+    noTty,
   };
 }
 
 /**
- * CLI entrypoint for `harness watch --timeout <duration> [--idle-timeout <duration>] [--max-repeat <N>] -- <cmd> [args...]`
+ * CLI entrypoint for `harness watch --timeout <duration> [--idle-timeout <duration>] [--max-repeat <N>] [--tty | --no-tty] -- <cmd> [args...]`
  */
 export async function runWatchCli(targetRoot, args) {
-  const { sepIdx, cmdArgs, wallTimeoutMs, idleTimeoutMs, maxRepeat } = parseWatchArgs(args);
+  const { sepIdx, cmdArgs, wallTimeoutMs, idleTimeoutMs, maxRepeat, tty, noTty } =
+    parseWatchArgs(args);
 
   if (sepIdx === -1 || !wallTimeoutMs) {
     console.error(
-      "Usage: harness watch --timeout <duration> [--idle-timeout 5m] [--max-repeat 100] -- <cmd> [args...]\n" +
+      "Usage: harness watch --timeout <duration> [--idle-timeout 5m] [--max-repeat 100] [--tty] -- <cmd> [args...]\n" +
         "Error: Missing or invalid required --timeout <duration> (e.g. 30s, 5m, 2h) or '--' command separator."
     );
     return 2;
@@ -382,6 +521,8 @@ export async function runWatchCli(targetRoot, args) {
     wallTimeoutMs,
     idleTimeoutMs,
     maxRepeat,
+    tty,
+    noTty,
   });
   return exitCode;
 }

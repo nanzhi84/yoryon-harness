@@ -563,3 +563,195 @@ describe("TestWatchdogSignalCascade", () => {
     assert.deepEqual(afterCounts, beforeCounts);
   });
 });
+
+describe("TestWatchdogTerminalAndProgress", () => {
+  it("test_tty_flag_with_dumb_term_injects_terminal_env_and_keeps_stdout_clean", () => {
+    const env = { ...process.env, TERM: "dumb" };
+    delete env.TTY_COMPATIBLE;
+    delete env.FORCE_COLOR;
+    delete env.CLICOLOR_FORCE;
+    delete env.NO_COLOR;
+    delete env.COLUMNS;
+    delete env.LINES;
+
+    const script = [
+      'process.stderr.write("progress-stderr\\n");',
+      'process.stdout.write(JSON.stringify({',
+      '  ttyCompat: process.env.TTY_COMPATIBLE,',
+      '  forceColor: process.env.FORCE_COLOR,',
+      '  term: process.env.TERM,',
+      '  cols: process.env.COLUMNS,',
+      '  lines: process.env.LINES,',
+      '}));',
+    ].join(" ");
+
+    const res = spawnSync(
+      process.execPath,
+      [CLI_BIN, "watch", "--tty", "--timeout", "5s", "--", process.execPath, "-e", script],
+      {
+        cwd: ROOT,
+        env,
+        encoding: "utf8",
+        timeout: 15000,
+      }
+    );
+
+    assert.equal(res.error, undefined);
+    assert.equal(res.status, 0, res.stderr);
+    const parsed = JSON.parse(res.stdout);
+    assert.equal(parsed.ttyCompat, "1");
+    assert.equal(parsed.forceColor, "1");
+    assert.equal(parsed.term, "xterm-256color");
+    assert.ok(Number(parsed.cols) > 0, `Expected COLUMNS > 0, got ${parsed.cols}`);
+    assert.ok(Number(parsed.lines) > 0, `Expected LINES > 0, got ${parsed.lines}`);
+    assert.equal(res.stderr.includes("progress-stderr"), true);
+  });
+
+  it("test_outer_smart_terminal_auto_forwards_tty_compatibility_unless_dumb_or_disabled", async () => {
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.TTY_COMPATIBLE;
+    delete cleanEnv.COLUMNS;
+    delete cleanEnv.LINES;
+    delete cleanEnv.NO_COLOR;
+
+    const script = [
+      'process.stdout.write(JSON.stringify({',
+      '  ttyCompat: process.env.TTY_COMPATIBLE ?? null,',
+      '  cols: process.env.COLUMNS ?? null,',
+      '  lines: process.env.LINES ?? null,',
+      '}));',
+    ].join(" ");
+
+    const runCase = async (options) => {
+      let stdout = "";
+      const res = await runWatchedProcess(
+        ROOT,
+        [process.execPath, "-e", script],
+        {
+          ...options,
+          onStdoutChunk: (chunk) => {
+            stdout += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+          },
+        }
+      );
+      assert.equal(res.exitCode, 0);
+      return JSON.parse(stdout);
+    };
+
+    const caseA = await runCase({
+      wallTimeoutMs: 5000,
+      outerStdoutIsTty: true,
+      outerStderrIsTty: true,
+      outerColumns: 132,
+      outerRows: 43,
+      env: { ...cleanEnv, TERM: "xterm-256color" },
+    });
+    assert.equal(caseA.ttyCompat, "1");
+    assert.equal(caseA.cols, "132");
+    assert.equal(caseA.lines, "43");
+
+    const caseB = await runCase({
+      wallTimeoutMs: 5000,
+      outerStdoutIsTty: true,
+      outerStderrIsTty: true,
+      outerColumns: 132,
+      outerRows: 43,
+      env: { ...cleanEnv, TERM: "dumb" },
+    });
+    assert.equal(caseB.ttyCompat, null);
+
+    const caseC = await runCase({
+      wallTimeoutMs: 5000,
+      noTty: true,
+      outerStdoutIsTty: true,
+      outerStderrIsTty: true,
+      outerColumns: 132,
+      outerRows: 43,
+      env: { ...cleanEnv, TERM: "xterm-256color" },
+    });
+    assert.equal(caseC.ttyCompat, null);
+
+    const caseD = await runCase({
+      wallTimeoutMs: 5000,
+      outerStdoutIsTty: false,
+      outerStderrIsTty: true,
+      outerColumns: 132,
+      outerRows: 43,
+      env: { ...cleanEnv, TERM: "xterm-256color" },
+    });
+    assert.equal(caseD.ttyCompat, null);
+  });
+
+  it("test_in_place_carriage_return_and_cursor_control_frames_do_not_trigger_loop_breaker", () => {
+    const progressScript = [
+      'for (let i = 0; i < 35; i++) process.stderr.write("\\rDownloading 50%");',
+      'for (let i = 0; i < 35; i++) process.stderr.write("\\r\\x1b[2K\\x1b[1AWaiting for worker\\n");',
+      "process.exit(0);",
+    ].join(" ");
+
+    const progressRes = runWatch([
+      "--timeout",
+      "5s",
+      "--max-repeat",
+      "10",
+      "--",
+      process.execPath,
+      "-e",
+      progressScript,
+    ]);
+    assert.equal(progressRes.error, undefined);
+    assert.equal(progressRes.status, 0, progressRes.stderr);
+
+    const loopScript = [
+      'for (let i = 0; i < 35; i++) process.stderr.write("\\x1b[31mERROR: connection refused\\x1b[0m\\n");',
+    ].join(" ");
+
+    const loopRes = runWatch([
+      "--timeout",
+      "5s",
+      "--max-repeat",
+      "10",
+      "--",
+      process.execPath,
+      "-e",
+      loopScript,
+    ]);
+    assert.equal(loopRes.error, undefined);
+    assert.equal(loopRes.status, 124, `Expected 124, got ${loopRes.status}: ${loopRes.stderr}`);
+    assert.match(loopRes.stderr, /LOOP_DETECTED/);
+  });
+
+  it("test_tty_flag_over_non_tty_pipe_deduplicates_consecutive_identical_redraw_frames", () => {
+    const script = [
+      "let count = 0;",
+      "const timer = setInterval(() => {",
+      "  count += 1;",
+      "  if (count <= 15) {",
+      '    process.stderr.write("\\r\\x1b[2KInitializing panel");',
+      "    return;",
+      "  }",
+      "  clearInterval(timer);",
+      '  process.stderr.write("\\r\\x1b[2KCompleted 5/5\\n");',
+      '  process.stdout.write(\'{"ok":true}\\n\');',
+      "  process.exit(0);",
+      "}, 10);",
+    ].join(" ");
+
+    const res = spawnSync(
+      process.execPath,
+      [CLI_BIN, "watch", "--tty", "--timeout", "5s", "--", process.execPath, "-e", script],
+      {
+        cwd: ROOT,
+        encoding: "utf8",
+        timeout: 15000,
+      }
+    );
+
+    assert.equal(res.error, undefined);
+    assert.equal(res.status, 0, res.stderr);
+    assert.deepEqual(JSON.parse(res.stdout), { ok: true });
+    const occurrences = res.stderr.split("Initializing panel").length - 1;
+    assert.equal(occurrences, 1, `Expected 1 occurrence of Initializing panel, got ${occurrences}: ${res.stderr}`);
+    assert.equal(res.stderr.includes("Completed 5/5"), true);
+  });
+});

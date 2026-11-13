@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Added
+- `harness watch` 与 `harness run` 新增 `--tty` / `--no-tty` 终端兼容开关及外层真实非 `dumb` 终端自动透传（[src/watch.js](src/watch.js)、[src/run.js](src/run.js)、[bin/harness.js](bin/harness.js)）：外层具备真终端且非 `dumb`/`unknown` 时自动向子进程注入 `TTY_COMPATIBLE=1`、`COLUMNS` 与 `LINES`；显式传入 `--tty` 时补齐 `FORCE_COLOR=1`、`CLICOLOR_FORCE=1` 与兜底 `TERM=xterm-256color`，保持 `stdout`/`stderr` 严格分流，并在外层为非终端管道时自动对连续相同的原地重绘帧进行去重节流。
+
+### Fixed
+- 修复 [src/watch.js](src/watch.js) `inspectLines` 仅按 `\r?\n` 切分导致裸 `\r` 进度条累积 `partial` 缓冲、以及原地重绘进度帧（裸 `\r` 或含 ANSI 光标控制序列）被误判为 `LOOP_DETECTED` 熔断的问题，同时保留带 SGR 颜色码错误日志的死循环熔断能力。
+
 ### Removed
 - 移除 `templates/AGENTS.md` 中的手动“静态与契约检查”条款（Issue #2）：静态类型、Linter 与契约巡检统一收归自动化 Git `pre-commit` 与轻量 `Stop` 钩子守护，违规时由钩子按需注入规则说明与豁免指引，消除提示词驱使模型重复跑全仓 `pyright` 的时间开销。
 - 移除 `harness tdd verify` 命令及相关实现（`src/tdd.js`、`src/tdd-files.js`、`tests/tdd_restoration.test.js`）：进程级 `exitCode !== 0` 红灯校验在 Agent 批量编写多条测试用例时存在单条用例失败或 `ImportError` 即整体放行的搭便车漏洞，统一收敛为静态测试契约巡检（`TST001`~`TST004`）、独立子代理（Fresh Subagent）黑盒盲写测试与 `harness run` 隔离沙盒真实验收。
