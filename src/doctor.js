@@ -7,14 +7,14 @@ export const RULES = {
     code: "HAR001",
     title: "Missing core Harness directory or entry document",
     summary:
-      "Ensures README.md, AGENTS.md, PROJECTS.md, CHANGELOG.md, docs/README.md, docs/architecture/overview.md, docs/reference/INDEX.md, and the five docs/ subdirectories exist.",
+      "Ensures README.md, AGENTS.md, PROJECTS.md, docs/README.md, the four required docs/architecture/ files (overview.md, data-flow.md, data-model.md, invariants.md), docs/reference/INDEX.md, and the four docs/ subdirectories exist.",
     fix: "Run `harness init` to create missing directories and baseline files.",
   },
   DIR001: {
     code: "DIR001",
     title: "Unauthorized file or directory in repository root or docs/",
     summary:
-      "Enforces the directory allowlist for `docs/` (`README.md` + `architecture/`, `spec/`, `adr/`, `runbooks/`, `reference/`) and repository root (standard facade docs, engineering configs, and minimal universal workspace directories; project/framework directories require `rootAllowlist` in `.agents/harness.json`). Blocks stray binary files (`.png`, `.jpg`, `.pdf`, `.zip`, etc.), temporary scripts, and non-standard `docs/` subdirectories.",
+      "Enforces the directory allowlist for `docs/` (`README.md` + `architecture/`, `adr/`, `runbooks/`, `reference/`), the fixed file set inside `docs/architecture/` (`overview.md`, `data-flow.md`, `data-model.md`, `invariants.md`, and optional `deployment.md`), and repository root (standard facade docs, engineering configs, and minimal universal workspace directories; project/framework directories require `rootAllowlist` in `.agents/harness.json`). Explicitly forbids `CHANGELOG.md`, `docs/spec/`, stray binary files (`.png`, `.jpg`, `.pdf`, `.zip`, etc.), temporary scripts, and non-standard `docs/` subdirectories.",
     fix: "Move or remove the unauthorized file/directory, or declare project-specific root entries under `rootAllowlist` in `.agents/harness.json`.",
   },
   GIT001: {
@@ -26,17 +26,10 @@ export const RULES = {
   },
   ARC001: {
     code: "ARC001",
-    title: "Architecture overview missing required Mermaid diagrams",
+    title: "Architecture document missing required Mermaid diagram",
     summary:
-      "`docs/architecture/overview.md` must include at least two `mermaid` diagram blocks (Module Boundary diagram and Core Execution Flow diagram).",
-    fix: "Add the two required ```mermaid blocks (module boundary flowchart and core execution flow diagram) in `docs/architecture/overview.md`.",
-  },
-  SPC001: {
-    code: "SPC001",
-    title: "Invalid spec directory naming or missing spec document",
-    summary:
-      "Entries inside `docs/spec/` must be issue-aligned directories named `issue#<N>/` (e.g., `issue#1/`, `issue#15/`) and contain at least one `.md` file.",
-    fix: "Use `harness spec new <issue-number>` to create `docs/spec/issue#<N>/spec.md`.",
+      "`docs/architecture/overview.md` must include at least one `mermaid` diagram block (module boundary / context flowchart) and `docs/architecture/data-flow.md` must include at least one `mermaid` diagram block (core execution / data flow diagram).",
+    fix: "Add at least one ```mermaid block to both `docs/architecture/overview.md` and `docs/architecture/data-flow.md`.",
   },
   ADR001: {
     code: "ADR001",
@@ -159,10 +152,19 @@ const IGNORED_WALK_DIRS = new Set([
 
 const DEFAULT_DOCS_ALLOWED_DIRS = new Set([
   "architecture",
-  "spec",
   "adr",
   "runbooks",
   "reference",
+]);
+
+const DEFAULT_ARCH_ALLOWED_FILES = new Set([
+  "overview.md",
+  "data-flow.md",
+  "data-model.md",
+  "invariants.md",
+  "deployment.md",
+  ".gitkeep",
+  ".DS_Store",
 ]);
 
 const DEFAULT_DOCS_ALLOWED_FILES = new Set(["README.md", ".gitkeep", ".DS_Store"]);
@@ -171,7 +173,6 @@ const DEFAULT_ROOT_ALLOWED_FILES = new Set([
   "README.md",
   "PROJECTS.md",
   "AGENTS.md",
-  "CHANGELOG.md",
   "CLAUDE.md",
   "LICENSE",
   "LICENSE.md",
@@ -1129,7 +1130,6 @@ export function checkWorkspace(targetRoot = process.cwd()) {
   // 1. HAR001: Required directories and core entry files
   const requiredDirs = [
     "docs/architecture",
-    "docs/spec",
     "docs/adr",
     "docs/adr/superseded",
     "docs/runbooks",
@@ -1146,9 +1146,11 @@ export function checkWorkspace(targetRoot = process.cwd()) {
     "README.md",
     "AGENTS.md",
     "PROJECTS.md",
-    "CHANGELOG.md",
     "docs/README.md",
     "docs/architecture/overview.md",
+    "docs/architecture/data-flow.md",
+    "docs/architecture/data-model.md",
+    "docs/architecture/invariants.md",
     "docs/reference/INDEX.md",
   ];
   for (const f of requiredFiles) {
@@ -1183,12 +1185,16 @@ export function checkWorkspace(targetRoot = process.cwd()) {
 
       if (entry.isDirectory()) {
         if (!DEFAULT_DOCS_ALLOWED_DIRS.has(entry.name)) {
+          const fixMsg =
+            entry.name === "spec"
+              ? "Migrate any unimplemented specs to GitHub Issues and remove 'docs/spec/'."
+              : `Move research/reference documents into 'docs/reference/' (and register in 'docs/reference/INDEX.md') or remove '${relEntry}/'.`;
           addDiag(
             "DIR001",
             relEntry,
             1,
-            `Unauthorized directory '${relEntry}/' inside 'docs/'; only the 5 standard subdirectories ('architecture/', 'spec/', 'adr/', 'runbooks/', 'reference/') are allowed.`,
-            `Move research/reference documents into 'docs/reference/' (and register in 'docs/reference/INDEX.md') or remove '${relEntry}/'.`
+            `Unauthorized directory '${relEntry}/' inside 'docs/'; only the 4 standard subdirectories ('architecture/', 'adr/', 'runbooks/', 'reference/') are allowed.`,
+            fixMsg
           );
         }
       } else if (!DEFAULT_DOCS_ALLOWED_FILES.has(entry.name)) {
@@ -1197,7 +1203,35 @@ export function checkWorkspace(targetRoot = process.cwd()) {
           relEntry,
           1,
           `Unauthorized top-level file '${relEntry}' inside 'docs/'; only 'docs/README.md' is allowed directly under 'docs/'.`,
-          `Move '${relEntry}' into the appropriate 'docs/' subdirectory ('architecture/', 'spec/issue#<N>/', 'adr/', 'runbooks/', or 'reference/').`
+          `Move '${relEntry}' into the appropriate 'docs/' subdirectory ('architecture/', 'adr/', 'runbooks/', or 'reference/').`
+        );
+      }
+    }
+  }
+
+  // 1c. DIR001: Strict fixed-slot file allowlist inside docs/architecture/
+  const archDir = path.join(targetRoot, "docs/architecture");
+  if (fs.existsSync(archDir) && fs.statSync(archDir).isDirectory()) {
+    for (const entry of fs.readdirSync(archDir, { withFileTypes: true })) {
+      if (entry.name === ".DS_Store" || entry.name === ".gitkeep") continue;
+      const relEntry = `docs/architecture/${entry.name}`;
+      if (isGitIgnored(targetRoot, relEntry, gitignorePatterns)) continue;
+
+      if (entry.isDirectory()) {
+        addDiag(
+          "DIR001",
+          relEntry,
+          1,
+          `Unauthorized subdirectory '${relEntry}/' inside 'docs/architecture/'; only the fixed files ('overview.md', 'data-flow.md', 'data-model.md', 'invariants.md', and optional 'deployment.md') are allowed.`,
+          `Consolidate architectural facts into 'overview.md', 'data-flow.md', 'data-model.md', 'invariants.md', or 'deployment.md' and remove '${relEntry}/'.`
+        );
+      } else if (!DEFAULT_ARCH_ALLOWED_FILES.has(entry.name)) {
+        addDiag(
+          "DIR001",
+          relEntry,
+          1,
+          `Unauthorized file '${relEntry}' inside 'docs/architecture/'; only the fixed files ('overview.md', 'data-flow.md', 'data-model.md', 'invariants.md', and optional 'deployment.md') are allowed.`,
+          `Consolidate architectural facts into 'overview.md', 'data-flow.md', 'data-model.md', 'invariants.md', or 'deployment.md' (or move static external material to 'docs/reference/') and remove '${relEntry}'.`
         );
       }
     }
@@ -1207,6 +1241,16 @@ export function checkWorkspace(targetRoot = process.cwd()) {
     if (entry.name === ".DS_Store" || entry.name === ".gitkeep") continue;
     // Skipping dependency/build contents during scanning does not authorize their root directory.
     if (isGitIgnored(targetRoot, entry.name, gitignorePatterns, { scanExclusions: false })) continue;
+    if (!entry.isDirectory() && entry.name === "CHANGELOG.md") {
+      addDiag(
+        "DIR001",
+        entry.name,
+        1,
+        "Forbidden file 'CHANGELOG.md' in repository root; changelogs are not maintained in-repo.",
+        "Remove 'CHANGELOG.md' and publish release notes directly via GitHub Releases."
+      );
+      continue;
+    }
     if (isCustomAllowed(entry.name, customRootAllowlist)) continue;
 
     if (entry.isDirectory()) {
@@ -1261,60 +1305,24 @@ export function checkWorkspace(targetRoot = process.cwd()) {
     }
   }
 
-  // 3. ARC001: docs/architecture/overview.md must contain at least 2 mermaid diagrams
-  const archOverviewPath = path.join(targetRoot, "docs/architecture/overview.md");
-  if (fs.existsSync(archOverviewPath) && fs.statSync(archOverviewPath).isFile()) {
-    const archContent = fs.readFileSync(archOverviewPath, "utf8");
-    const mermaidBlocks = archContent.match(/^\s*`{3,}\s*mermaid\b/gim) || [];
-    if (mermaidBlocks.length < 2) {
-      addDiag(
-        "ARC001",
-        "docs/architecture/overview.md",
-        1,
-        `Expected at least 2 Mermaid diagrams in 'docs/architecture/overview.md' (found ${mermaidBlocks.length}).`
-      );
-    }
-  }
-
-  // 4. SPC001: docs/spec/ issue#<N> naming and structure
-  const specDir = path.join(targetRoot, "docs/spec");
-  if (fs.existsSync(specDir) && fs.statSync(specDir).isDirectory()) {
-    const entries = fs.readdirSync(specDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.name === ".gitkeep" || entry.name === ".DS_Store") continue;
-      const relEntry = `docs/spec/${entry.name}`;
-      if (!entry.isDirectory()) {
+  // 3. ARC001: docs/architecture/overview.md and docs/architecture/data-flow.md must each contain at least 1 mermaid diagram
+  for (const archRel of ["docs/architecture/overview.md", "docs/architecture/data-flow.md"]) {
+    const archPath = path.join(targetRoot, archRel);
+    if (fs.existsSync(archPath) && fs.statSync(archPath).isFile()) {
+      const archContent = fs.readFileSync(archPath, "utf8");
+      const mermaidBlocks = archContent.match(/^\s*`{3,}\s*mermaid\b/gim) || [];
+      if (mermaidBlocks.length < 1) {
         addDiag(
-          "SPC001",
-          relEntry,
+          "ARC001",
+          archRel,
           1,
-          `Spec entry '${entry.name}' must be an issue directory named 'issue#<N>/', not a flat file.`,
-          `Create an issue folder via \`harness spec new <issue-number>\` and move '${entry.name}' inside it.`
+          `Expected at least 1 Mermaid diagram in '${archRel}' (found ${mermaidBlocks.length}).`
         );
-        continue;
-      }
-      if (!/^issue#\d+$/i.test(entry.name)) {
-        addDiag(
-          "SPC001",
-          relEntry,
-          1,
-          `Spec directory '${entry.name}' does not match 'issue#<N>' format (e.g., 'issue#1', 'issue#15').`
-        );
-      } else {
-        const innerFiles = fs.readdirSync(path.join(specDir, entry.name));
-        if (!innerFiles.some((f) => f.endsWith(".md"))) {
-          addDiag(
-            "SPC001",
-            relEntry,
-            1,
-            `Spec directory '${entry.name}/' does not contain any Markdown (.md) document (such as 'spec.md').`
-          );
-        }
       }
     }
   }
 
-  // 5. ADR001 & ADR002: docs/adr/ and docs/adr/superseded/
+  // 4. ADR001 & ADR002: docs/adr/ and docs/adr/superseded/
   const adrDir = path.join(targetRoot, "docs/adr");
   if (fs.existsSync(adrDir) && fs.statSync(adrDir).isDirectory()) {
     const checkAdrFolder = (folderAbs, isSupersededFolder) => {
@@ -1428,10 +1436,7 @@ export function checkWorkspace(targetRoot = process.cwd()) {
 
     // Text & suppression lint
     const { suppressedRules, issues } = scanMarkdownTextAndSuppressions(content);
-    const isLongLivedDoc =
-      !relFile.startsWith("docs/spec/") &&
-      !relFile.startsWith("docs/adr/") &&
-      relFile !== "CHANGELOG.md";
+    const isLongLivedDoc = !relFile.startsWith("docs/adr/");
 
     for (const issue of issues) {
       if (issue.code === "VOX001" && !isLongLivedDoc) continue;

@@ -27,4 +27,3 @@ harness doctor
 
 - **Agent 与项目特异规则**：[AGENTS.md](AGENTS.md) · [PROJECTS.md](PROJECTS.md)
 - **文档导航与全局架构**：[文档维护规范](docs/README.md) · [全局架构现状](docs/architecture/overview.md)
-- **版本发布记录**：[CHANGELOG.md](CHANGELOG.md)

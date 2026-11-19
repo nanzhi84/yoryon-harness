@@ -18,8 +18,8 @@
   - 测试文件必须按领域能力命名（`tests/test_<domain>.py` 或 `tests/<domain>.test.ts`，严禁使用 `test_phase1`、`test1` 等排期或序号命名）。
   - 测试用例统一采用 `class Test<被测对象>:` + `def test_<场景或输入条件>_<预期行为结果>()`（或 TS/JS `describe("Test<被测对象>", ...)` + `it("test_<场景或输入条件>_<预期行为结果>", ...)`）层级结构，涵盖“被测对象、输入条件、预期外在行为”三要素，且严禁将底层实现库名写入测试名称。
 - **Issue Checklist 诚实打勾与评论留痕**
-  - 所有 Issue（含本地 `docs/spec/issue#<N>/spec.md` 与 GitHub 线上 Issue）中的实施与验收 Checklist 必须随任务推进逐一核对并如实打勾：已通过真实运行验收的项勾选 `[x]`，遇到阻塞或卡点未跑通的项诚实保持 `[ ]` 未勾选。
-  - 原 Issue 正文仅允许勾选状态框（严禁擅自篡改原 Issue 正文表述），具体测试结论与受阻原因统一在 **Issue Comment** 中补充说明。
+  - 需求、设计与验收 Checklist 优先托管在 GitHub 线上 Issue，也可视情况临时放在本地忽略目录 `work/` 中维护（严禁在仓库追踪目录内维护 `docs/spec/`），并随任务推进逐一核对、如实打勾：已通过真实运行验收的项勾选 `[x]`，遇到阻塞或卡点未跑通的项诚实保持 `[ ]` 未勾选。
+  - 若使用线上 Issue，原 Issue 正文仅允许勾选状态框（严禁擅自篡改原 Issue 正文表述），具体测试结论与受阻原因统一在 **Issue Comment** 中补充说明。
 
 ## 2. 根目录工作区约定
 
@@ -29,11 +29,11 @@
 - `tests/`：仅存放核心链路的高价值黑盒与集成测试。
 - `work/` & `artifacts/`：日常开发与端到端执行验收产生的临时运行数据和构建产物（已忽略不入库，随时可清理）。
 - `experiments/<name>/`：独立的技术选型与原型探索沙盒，内部环境与配置自包含，严禁为日常功能改动新建实验。
-- `CHANGELOG.md`：集中记录版本发布、能力演进与破坏性变更。
+- 严禁在仓库根目录维护 `CHANGELOG.md`，版本变更记录统一通过 GitHub Releases 发布。
 
 ## 3. 渐进式上下文路由（按需读取）
 
 请根据当前任务性质，主动读取以下规范，未涉及的领域无需加载：
 
 - **开始任何业务代码编写、修改数据流或外部集成前**：必须先读取根目录的 [PROJECTS.md](PROJECTS.md) 与 [docs/architecture/](docs/architecture)，严格遵守当前项目的领域红线与架构现状。
-- **读写、移动或归档任何文档前**：必须先读取 [docs/README.md](docs/README.md)，严格遵守 `architecture`、`spec`（`issue#<N>/`）、`adr`、`runbooks`、`reference` 的生命周期与归档纪律（可使用 `harness spec new`、`harness adr new`、`harness adr supersede` 辅助流转）。
+- **读写、移动或归档任何文档前**：必须先读取 [docs/README.md](docs/README.md)，严格遵守 `architecture`、`adr`、`runbooks`、`reference` 四大文档目录的生命周期与归档纪律（可使用 `harness adr new`、`harness adr supersede` 辅助流转）。

@@ -9,7 +9,6 @@ const TEMPLATES_DIR = path.resolve(__dirname, "../templates");
 
 const REQUIRED_DIRS = [
   "docs/architecture",
-  "docs/spec",
   "docs/adr/superseded",
   "docs/runbooks",
   "docs/reference",
@@ -88,8 +87,10 @@ export function runInit(targetRoot = process.cwd(), options = {}) {
     { path: "docs/README.md", overwrite: force },
     { path: "README.md", overwrite: false },
     { path: "PROJECTS.md", overwrite: false },
-    { path: "CHANGELOG.md", overwrite: false },
     { path: "docs/architecture/overview.md", overwrite: false },
+    { path: "docs/architecture/data-flow.md", overwrite: false },
+    { path: "docs/architecture/data-model.md", overwrite: false },
+    { path: "docs/architecture/invariants.md", overwrite: false },
     { path: "docs/reference/INDEX.md", overwrite: false },
   ];
 
@@ -100,7 +101,6 @@ export function runInit(targetRoot = process.cwd(), options = {}) {
 
   // Keep .gitkeep in empty tracked dirs if those dirs have no files yet
   const gitkeepDirs = [
-    "docs/spec",
     "docs/adr/superseded",
     "docs/runbooks",
     "tests",

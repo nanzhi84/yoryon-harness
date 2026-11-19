@@ -18,8 +18,8 @@
 
 ## Core ideas
 
-- **渐进式上下文路由**：顶层 `AGENTS.md` 仅做极简路由表，项目特异红线（`PROJECTS.md`）与五大文档规范（`docs/README.md`）按需加载，避免无关上下文污染。
-- **按生命周期隔离文档**：严格区分活架构现状（`architecture/`）、按需关联 GitHub Issue 的增量设计包（`spec/issue#N/`）、带推翻归档链路的架构决策（`adr/` + `superseded/`）、运维手册（`runbooks/`）与定稿封存的外部参考（`reference/`）。
+- **渐进式上下文路由**：顶层 `AGENTS.md` 仅做极简路由表，项目特异红线（`PROJECTS.md`）与四大文档规范（`docs/README.md`）按需加载，避免无关上下文污染。
+- **按生命周期隔离文档**：严格区分固定槽位的活架构现状（`architecture/`）、带推翻归档链路的架构决策（`adr/` + `superseded/`）、高频标准 SOP（`runbooks/`）与定稿封存的外部参考（`reference/`）；需求提案与版本记录分别交由 GitHub Issues 与 Releases，不在仓库内堆积过时文档。
 - **重真实运行、轻垃圾单测**：拒绝凑覆盖率的脆弱 Mock 单元测试，通过 `harness run` 在隔离的 `work/` 与 `artifacts/` 沙盒中用真实输入跑通端到端流程并落盘 `receipt.json` 回执。
 - **自愈式结构与死链巡检**：内置零依赖 `harness doctor` 巡检引擎，自动校验目录合规、ADR 状态流转、参考索引登记以及 Markdown 本地死链与锚点，并直接输出供 Agent 自修复的指令。
 
@@ -30,11 +30,11 @@
 ```text
 请为当前仓库接入 yoryon-harness 并对齐现有文档结构：
 
-1. 在仓库根目录运行 `harness init`，生成标准目录骨架（`AGENTS.md`、`PROJECTS.md`、`CHANGELOG.md`、`docs/{architecture,spec,adr/superseded,runbooks,reference}`、`work/`、`artifacts/`）。
-2. 完整阅读 `AGENTS.md` 与 `docs/README.md`，理解五大文档模块的生命周期边界及架构文档的引用规范。
+1. 在仓库根目录运行 `harness init`，生成标准目录骨架（`AGENTS.md`、`PROJECTS.md`、`docs/{architecture,adr/superseded,runbooks,reference}`、`work/`、`artifacts/`）。
+2. 完整阅读 `AGENTS.md` 与 `docs/README.md`，理解四大文档模块的生命周期边界及架构文档的固定槽位规范。
 3. 扫描仓库中现有的所有文档、旧规则与配置：
    - 提炼出本项目特有的业务背景、技术栈约束与领域红线，汇总草拟到根目录的 `PROJECTS.md` 中。
-   - 列出一张从旧文档路径到新目录（`docs/architecture/`、`docs/spec/issue#N/`、`docs/adr/NNNN-*.md`、`docs/runbooks/`、`docs/reference/` 及 `INDEX.md`）的迁移映射表。
+   - 列出一张从旧文档路径到新目录（`docs/architecture/{overview,data-flow,data-model,invariants,deployment}.md`、`docs/adr/NNNN-*.md`、`docs/runbooks/`、`docs/reference/` 及 `INDEX.md`）的迁移映射表（未实施提案迁移至 GitHub Issue 或临时放于 `work/`，废弃 `CHANGELOG.md`）。
 4. 先在终端输出 `PROJECTS.md` 草稿和迁移映射表供我确认，在我批准前不要移动或删除任何已有文件；批准后使用 `git mv` 迁移，并运行 `harness doctor` 直至所有结构与死链检查全部通过。
 ```
 
@@ -47,8 +47,7 @@ cd /Users/yoryon/yoryon-harness && npm link
 # 在任意新老项目中初始化骨架（或运行 harness sync 升级通用规范）
 harness init
 
-# 按需创建关联 GitHub Issue 的 Spec 与演进 ADR
-harness spec new issue#1 --title "UI 矩阵重构方案"
+# 按需创建与演进 ADR
 harness adr new use-postgres
 harness adr supersede 0001 migrate-to-supabase --reason "需要内置 Auth 与实时订阅能力"
 
@@ -65,10 +64,10 @@ harness doctor
 }
 ```
 
-仅列出项目实际需要的目录，不自动放行扫描到的全部目录。`harness init` 与 `harness sync` 不覆盖已有配置；默认通用目录与忽略规则见[架构约束](docs/architecture/overview.md#3-系统不变量与边界约束)。
+仅列出项目实际需要的目录，不自动放行扫描到的全部目录。`harness init` 与 `harness sync` 不覆盖已有配置；默认通用目录与忽略规则见[系统不变量与边界约束](docs/architecture/invariants.md)。
 
 ## Learn more
 
 - **协作规范与项目红线**：[AGENTS.md](AGENTS.md) · [PROJECTS.md](PROJECTS.md)
 - **文档公约与全局架构**：[文档维护规范](docs/README.md) · [全局架构现状](docs/architecture/overview.md)
-- **外部参考与版本记录**：[参考资料索引](docs/reference/INDEX.md) · [CHANGELOG.md](CHANGELOG.md)
+- **外部参考索引**：[参考资料索引](docs/reference/INDEX.md)

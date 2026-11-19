@@ -15,63 +15,6 @@ function toSlug(input) {
 }
 
 /**
- * Parse `issue#15` or `15` into an integer issue number.
- */
-function parseIssueNumber(input) {
-  if (!input || input.startsWith("--")) return null;
-  const m = String(input).trim().match(/^(?:issue#?)?(\d+)$/i);
-  return m ? parseInt(m[1], 10) : null;
-}
-
-/**
- * `harness spec new <issue#<N> | <N>> [--title <title>] [--module <module>]`
- */
-export function createSpec(targetRoot, rawIssueArg, options = {}) {
-  const issueNum = parseIssueNumber(rawIssueArg);
-  if (issueNum === null) {
-    console.error(
-      'Usage: harness spec new <issue#<N> | <N>> [--title "<title>"] [--module "<architecture-module>"]'
-    );
-    return 1;
-  }
-
-  const folderName = `issue#${issueNum}`;
-  const specDir = path.join(targetRoot, "docs/spec", folderName);
-  const specFilePath = path.join(specDir, "spec.md");
-
-  if (fs.existsSync(specDir)) {
-    console.error(`Spec directory already exists: docs/spec/${folderName}`);
-    return 1;
-  }
-
-  fs.mkdirSync(specDir, { recursive: true });
-
-  const titleText = options.title || `Issue #${issueNum} Specification`;
-  const moduleNote = options.module || "[docs/architecture/overview.md](../../architecture/overview.md)";
-  const content = `# ${titleText}
-
-> **Status:** Proposal · Issue #${issueNum} · Created ${todayDateString()}
-> **Affected Architecture:** ${moduleNote}
-
-## 1. 背景与目标 (Context & Goals)
-
-<!-- 简述本次 Issue 改动要解决的核心问题、业务背景与目标边界 -->
-
-## 2. 方案设计 (Design & Contracts)
-
-<!-- 详细描述方案设计；若包含 UI 矩阵、分册设计、Checklist 或验证快照，可直接放在本 issue#${issueNum}/ 目录下并在此索引 -->
-
-## 3. 真实执行与验收标准 (Verification)
-
-<!-- 描述端到端真实运行验收的输入、预期产物与核对方式 -->
-`;
-
-  fs.writeFileSync(specFilePath, content, "utf8");
-  console.log(`Created spec: docs/spec/${folderName}/spec.md`);
-  return 0;
-}
-
-/**
  * Scan both `docs/adr/` and `docs/adr/superseded/` to find the highest 4-digit ADR number.
  */
 function getNextAdrNumber(targetRoot) {

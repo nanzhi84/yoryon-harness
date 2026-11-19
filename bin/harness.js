@@ -3,7 +3,7 @@
 import { runInit, runSync } from "../src/init.js";
 import { runDoctor, printRules } from "../src/doctor.js";
 import { runSandboxTask } from "../src/run.js";
-import { createSpec, createAdr, supersedeAdr } from "../src/scaffold.js";
+import { createAdr, supersedeAdr } from "../src/scaffold.js";
 import { installHooks, runHook, runPreToolHook } from "../src/hook.js";
 import { cleanSandboxes, cleanWorktrees } from "../src/clean.js";
 import { runWatchCli, parseWatchArgs } from "../src/watch.js";
@@ -17,14 +17,13 @@ Commands:
   init [--force]                                Initialize Universal Harness directories & docs in current repo
   sync                                          Sync latest AGENTS.md, docs/README.md, and .agents/hooks.json hooks
   doctor [--json]                               Check directory conventions, doc/text rules, test contracts, and dead links
-  rule [--all | <CODE>]                         Explain Harness check rules (HAR001, DIR001, GIT001, ARC001, SPC001, ADR001/002, REF001, LNK001/002, VOX001, SUP001, TST001-004, MTX001, AST001/002)
+  rule [--all | <CODE>]                         Explain Harness check rules (HAR001, DIR001, GIT001, ARC001, ADR001/002, REF001, LNK001/002, VOX001, SUP001, TST001-004, MTX001, AST001/002)
   hook install [--git] [--agents]               Install Git pre-commit & reference-transaction hooks and/or .agents/hooks.json PreToolUse & Stop hooks
   hook run [--agent] [--staged]                 Execute TTL sandbox & worktree cleanup + doctor + static typecheck & incremental format check
   hook pre-tool                                 Execute Antigravity PreToolUse watchdog & timeout enforcement check
   watch --timeout <dur> [options] -- <cmd...>   Run command under watchdog (wall timeout + 5m idle hang detector + 100-line loop breaker, [--tty])
   clean [--all] [--worktrees] [--max-age 12h]   Clean expired intermediate files in work/ and artifacts/ and prune stale Git worktree metadata
   run <task-name> [--timeout <dur>] [--tty] -- <cmd...> Run verification command in isolated work/ & artifacts/ sandbox with receipt
-  spec new <issue#<N>> [--title] [--module]     Create an issue-aligned spec directory (docs/spec/issue#<N>/spec.md)
   adr new <slug>                                Create a sequentially numbered ADR (docs/adr/NNNN-<slug>.md)
   adr supersede <old-id> <new> [--reason]       Mark an ADR Superseded, append failure note, and move to docs/adr/superseded/
   help                                          Show this help message
@@ -140,22 +139,6 @@ async function main() {
             }
           : null;
       const code = await runSandboxTask(cwd, taskName, cmdArgs, watchOptions);
-      process.exit(code);
-      break;
-    }
-
-    case "spec": {
-      const sub = args[1];
-      if (sub !== "new") {
-        console.error(
-          'Usage: harness spec new [issue#<N> | <N>] [--title "<title>"] [--module "<arch-module>"]'
-        );
-        process.exit(1);
-      }
-      const title = parseFlagValue(args, "--title");
-      const moduleName = parseFlagValue(args, "--module");
-      const issueArg = args[2] && !args[2].startsWith("--") ? args[2] : undefined;
-      const code = createSpec(cwd, issueArg, { title, module: moduleName });
       process.exit(code);
       break;
     }

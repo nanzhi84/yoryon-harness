@@ -3,6 +3,7 @@ import path from "node:path";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { describe, it } from "node:test";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -15,14 +16,6 @@ function runCli(cwd, args, options = {}) {
     timeout: 15000,
     ...options,
   });
-}
-
-function describe(_name, fn) {
-  fn();
-}
-
-function it(_name, fn) {
-  fn();
 }
 
 describe("TestUniversalHarness", () => {
@@ -47,20 +40,7 @@ describe("TestUniversalHarness", () => {
   const passInit = runCli(sandboxRoot, ["doctor"]);
   assert.equal(passInit.status, 0, passInit.stderr);
 
-  // 3. harness spec new (sparse issue#<N> format) + harness adr new + harness adr supersede
-  assert.equal(
-    runCli(sandboxRoot, ["spec", "new", "issue#1", "--title", "UI Matrix Redesign"]).status,
-    0
-  );
-  assert.ok(fs.existsSync(path.join(sandboxRoot, "docs/spec/issue#1/spec.md")));
-
-  // Non-consecutive / sparse issue number (e.g., issue#15 created by maintainer)
-  assert.equal(
-    runCli(sandboxRoot, ["spec", "new", "15", "--title", "Maintainer Feature Spec"]).status,
-    0
-  );
-  assert.ok(fs.existsSync(path.join(sandboxRoot, "docs/spec/issue#15/spec.md")));
-
+  // 3. harness adr new + harness adr supersede
   assert.equal(runCli(sandboxRoot, ["adr", "new", "use-postgres"]).status, 0);
   assert.equal(
     runCli(sandboxRoot, [
@@ -832,7 +812,7 @@ describe("TestUniversalHarness", () => {
   );
   assert.ok(
     dir001Report.diagnostics.some((d) => d.code === "DIR001" && d.file === "docs/assets"),
-    "Non-standard docs/assets/ directory must trigger DIR001 (only the 5 standard docs/ subdirectories are allowed)"
+    "Non-standard docs/assets/ directory must trigger DIR001 (only the 4 standard docs/ subdirectories are allowed)"
   );
   const rootPngDiag = dir001Report.diagnostics.find(
     (d) => d.code === "DIR001" && d.file === "frame_00.png"
@@ -1354,6 +1334,358 @@ describe("TestUniversalHarness", () => {
       // Clean up test sandbox
       fs.rmSync(sandboxRoot, { recursive: true, force: true });
     }
+  });
+});
+
+function withInitializedSandbox(name, fn) {
+  const sandboxRoot = path.join(REPO_ROOT, "work", name);
+  fs.rmSync(sandboxRoot, { recursive: true, force: true });
+  fs.mkdirSync(sandboxRoot, { recursive: true });
+  try {
+    const initRes = runCli(sandboxRoot, ["init"]);
+    assert.equal(initRes.status, 0, initRes.stderr);
+    fn(sandboxRoot);
+  } finally {
+    fs.rmSync(sandboxRoot, { recursive: true, force: true });
+  }
+}
+
+describe("TestSpecRemovalContract", () => {
+  it("test_init_in_fresh_repo_omits_docs_spec_and_changelog_and_passes_doctor", () => {
+    withInitializedSandbox("spec-removal-init", (sandboxRoot) => {
+      assert.equal(
+        fs.existsSync(path.join(sandboxRoot, "docs", "spec")),
+        false,
+        "harness init must NOT create docs/spec/"
+      );
+      assert.equal(
+        fs.existsSync(path.join(sandboxRoot, "CHANGELOG.md")),
+        false,
+        "harness init must NOT create CHANGELOG.md"
+      );
+      assert.equal(
+        fs.existsSync(path.join(sandboxRoot, "docs", "architecture", "deployment.md")),
+        false,
+        "harness init must NOT create optional docs/architecture/deployment.md"
+      );
+
+      const expectedPaths = [
+        "docs/architecture",
+        "docs/adr/superseded",
+        "docs/runbooks",
+        "docs/reference",
+        "README.md",
+        "AGENTS.md",
+        "PROJECTS.md",
+        "docs/README.md",
+        "docs/architecture/overview.md",
+        "docs/architecture/data-flow.md",
+        "docs/architecture/data-model.md",
+        "docs/architecture/invariants.md",
+        "docs/reference/INDEX.md",
+      ];
+      for (const relPath of expectedPaths) {
+        assert.equal(
+          fs.existsSync(path.join(sandboxRoot, relPath)),
+          true,
+          `harness init must create ${relPath}`
+        );
+      }
+
+      const doctorRes = runCli(sandboxRoot, ["doctor", "--json"]);
+      assert.equal(doctorRes.status, 0, doctorRes.stderr || doctorRes.stdout);
+      const report = JSON.parse(doctorRes.stdout);
+      assert.equal(report.ok, true);
+      assert.deepEqual(report.diagnostics, []);
+    });
+  });
+
+  it("test_doctor_with_docs_spec_directory_fails_with_dir001", () => {
+    withInitializedSandbox("spec-removal-dir001", (sandboxRoot) => {
+      const specFile = path.join(sandboxRoot, "docs", "spec", "issue#1", "spec.md");
+      fs.mkdirSync(path.dirname(specFile), { recursive: true });
+      fs.writeFileSync(specFile, "# Issue 1 Spec\n", "utf8");
+
+      const doctorRes = runCli(sandboxRoot, ["doctor", "--json"]);
+      assert.notEqual(doctorRes.status, 0, "harness doctor must fail when docs/spec/ exists");
+      const report = JSON.parse(doctorRes.stdout);
+      assert.equal(report.ok, false);
+      assert.ok(
+        report.diagnostics.some((d) => d.code === "DIR001" && d.file === "docs/spec"),
+        `Expected DIR001 pointing to docs/spec, got: ${JSON.stringify(report.diagnostics)}`
+      );
+    });
+  });
+
+  it("test_spec_new_command_and_spc001_rule_are_removed", () => {
+    withInitializedSandbox("spec-removal-cli", (sandboxRoot) => {
+      const specNewRes = runCli(sandboxRoot, ["spec", "new", "issue#1"]);
+      assert.notEqual(
+        specNewRes.status,
+        0,
+        "harness spec new issue#1 must fail with non-zero exit code"
+      );
+
+      const ruleSpcRes = runCli(sandboxRoot, ["rule", "SPC001"]);
+      assert.notEqual(
+        ruleSpcRes.status,
+        0,
+        "harness rule SPC001 must fail with non-zero exit code"
+      );
+
+      const ruleAllRes = runCli(sandboxRoot, ["rule", "--all"]);
+      assert.equal(ruleAllRes.status, 0, ruleAllRes.stderr);
+      assert.equal(
+        ruleAllRes.stdout.includes("SPC001"),
+        false,
+        "harness rule --all must not contain SPC001"
+      );
+    });
+  });
+});
+
+describe("TestChangelogForbiddenContract", () => {
+  it("test_doctor_with_root_changelog_md_fails_with_dir001", () => {
+    withInitializedSandbox("changelog-forbidden-default", (sandboxRoot) => {
+      fs.writeFileSync(path.join(sandboxRoot, "CHANGELOG.md"), "# Changelog\n", "utf8");
+
+      const doctorRes = runCli(sandboxRoot, ["doctor", "--json"]);
+      assert.notEqual(doctorRes.status, 0, "harness doctor must fail when CHANGELOG.md exists");
+      const report = JSON.parse(doctorRes.stdout);
+      assert.equal(report.ok, false);
+      assert.ok(
+        report.diagnostics.some((d) => d.code === "DIR001" && d.file === "CHANGELOG.md"),
+        `Expected DIR001 pointing to CHANGELOG.md, got: ${JSON.stringify(report.diagnostics)}`
+      );
+    });
+  });
+
+  it("test_doctor_with_changelog_md_in_root_allowlist_still_fails_with_dir001", () => {
+    withInitializedSandbox("changelog-forbidden-allowlist", (sandboxRoot) => {
+      fs.writeFileSync(path.join(sandboxRoot, "CHANGELOG.md"), "# Changelog\n", "utf8");
+      fs.mkdirSync(path.join(sandboxRoot, ".agents"), { recursive: true });
+      fs.writeFileSync(
+        path.join(sandboxRoot, ".agents", "harness.json"),
+        JSON.stringify({ rootAllowlist: ["CHANGELOG.md"] }, null, 2),
+        "utf8"
+      );
+
+      const doctorRes = runCli(sandboxRoot, ["doctor", "--json"]);
+      assert.notEqual(
+        doctorRes.status,
+        0,
+        "harness doctor must fail when CHANGELOG.md exists even if listed in rootAllowlist"
+      );
+      const report = JSON.parse(doctorRes.stdout);
+      assert.equal(report.ok, false);
+      assert.ok(
+        report.diagnostics.some((d) => d.code === "DIR001" && d.file === "CHANGELOG.md"),
+        `Expected DIR001 pointing to CHANGELOG.md even with rootAllowlist, got: ${JSON.stringify(report.diagnostics)}`
+      );
+    });
+  });
+});
+
+describe("TestArchitectureFixedSlotsContract", () => {
+  it("test_doctor_with_all_five_allowed_architecture_files_passes_cleanly", () => {
+    withInitializedSandbox("arch-fixed-slots-valid", (sandboxRoot) => {
+      const archDir = path.join(sandboxRoot, "docs", "architecture");
+      fs.writeFileSync(
+        path.join(archDir, "overview.md"),
+        "# System Overview\n\n```mermaid\nflowchart TD\n  User --> App\n```\n",
+        "utf8"
+      );
+      fs.writeFileSync(
+        path.join(archDir, "data-flow.md"),
+        "# Data Flow\n\n```mermaid\nflowchart LR\n  Input --> Output\n```\n",
+        "utf8"
+      );
+      fs.writeFileSync(path.join(archDir, "data-model.md"), "# Data Model\n", "utf8");
+      fs.writeFileSync(path.join(archDir, "invariants.md"), "# Invariants\n", "utf8");
+      fs.writeFileSync(path.join(archDir, "deployment.md"), "# Deployment\n", "utf8");
+      fs.writeFileSync(path.join(archDir, ".gitkeep"), "", "utf8");
+
+      const doctorRes = runCli(sandboxRoot, ["doctor", "--json"]);
+      assert.equal(doctorRes.status, 0, doctorRes.stderr || doctorRes.stdout);
+      const report = JSON.parse(doctorRes.stdout);
+      assert.equal(report.ok, true);
+      assert.deepEqual(report.diagnostics, []);
+    });
+  });
+
+  it("test_doctor_with_missing_required_architecture_file_fails_with_har001", () => {
+    const requiredFiles = [
+      "docs/architecture/data-flow.md",
+      "docs/architecture/data-model.md",
+      "docs/architecture/invariants.md",
+    ];
+    for (const relPath of requiredFiles) {
+      const slug = path.basename(relPath, ".md");
+      withInitializedSandbox(`arch-missing-${slug}`, (sandboxRoot) => {
+        fs.rmSync(path.join(sandboxRoot, relPath), { force: true });
+
+        const doctorRes = runCli(sandboxRoot, ["doctor", "--json"]);
+        assert.notEqual(
+          doctorRes.status,
+          0,
+          `harness doctor must fail when required file ${relPath} is missing`
+        );
+        const report = JSON.parse(doctorRes.stdout);
+        assert.equal(report.ok, false);
+        assert.ok(
+          report.diagnostics.some((d) => d.code === "HAR001" && d.file === relPath),
+          `Expected HAR001 pointing to ${relPath}, got: ${JSON.stringify(report.diagnostics)}`
+        );
+      });
+    }
+  });
+
+  it("test_doctor_with_plain_text_overview_md_fails_with_arc001", () => {
+    withInitializedSandbox("arch-arc001-overview-missing", (sandboxRoot) => {
+      const archDir = path.join(sandboxRoot, "docs", "architecture");
+      fs.writeFileSync(
+        path.join(archDir, "overview.md"),
+        "# System Overview\n\nPlain text without any diagram.\n",
+        "utf8"
+      );
+      fs.writeFileSync(
+        path.join(archDir, "data-flow.md"),
+        "# Data Flow\n\n```mermaid\nflowchart LR\n  A --> B\n```\n",
+        "utf8"
+      );
+
+      const doctorRes = runCli(sandboxRoot, ["doctor", "--json"]);
+      assert.notEqual(
+        doctorRes.status,
+        0,
+        "harness doctor must fail when docs/architecture/overview.md has 0 mermaid blocks"
+      );
+      const report = JSON.parse(doctorRes.stdout);
+      assert.equal(report.ok, false);
+      assert.ok(
+        report.diagnostics.some(
+          (d) => d.code === "ARC001" && d.file === "docs/architecture/overview.md"
+        ),
+        `Expected ARC001 pointing to docs/architecture/overview.md, got: ${JSON.stringify(report.diagnostics)}`
+      );
+      assert.equal(
+        report.diagnostics.some(
+          (d) => d.code === "ARC001" && d.file === "docs/architecture/data-flow.md"
+        ),
+        false,
+        "docs/architecture/data-flow.md with a mermaid block must not trigger ARC001"
+      );
+    });
+  });
+
+  it("test_doctor_with_plain_text_data_flow_md_fails_with_arc001", () => {
+    withInitializedSandbox("arch-arc001-data-flow-missing", (sandboxRoot) => {
+      const archDir = path.join(sandboxRoot, "docs", "architecture");
+      fs.writeFileSync(
+        path.join(archDir, "overview.md"),
+        "# System Overview\n\n```mermaid\nflowchart TD\n  A --> B\n```\n",
+        "utf8"
+      );
+      fs.writeFileSync(
+        path.join(archDir, "data-flow.md"),
+        "# Data Flow\n\nPlain text without any diagram.\n",
+        "utf8"
+      );
+
+      const doctorRes = runCli(sandboxRoot, ["doctor", "--json"]);
+      assert.notEqual(
+        doctorRes.status,
+        0,
+        "harness doctor must fail when docs/architecture/data-flow.md has 0 mermaid blocks"
+      );
+      const report = JSON.parse(doctorRes.stdout);
+      assert.equal(report.ok, false);
+      assert.ok(
+        report.diagnostics.some(
+          (d) => d.code === "ARC001" && d.file === "docs/architecture/data-flow.md"
+        ),
+        `Expected ARC001 pointing to docs/architecture/data-flow.md, got: ${JSON.stringify(report.diagnostics)}`
+      );
+      assert.equal(
+        report.diagnostics.some(
+          (d) => d.code === "ARC001" && d.file === "docs/architecture/overview.md"
+        ),
+        false,
+        "docs/architecture/overview.md with a mermaid block must not trigger ARC001"
+      );
+    });
+  });
+
+  it("test_doctor_with_one_mermaid_in_overview_and_one_in_data_flow_passes_arc001", () => {
+    withInitializedSandbox("arch-arc001-both-valid", (sandboxRoot) => {
+      const archDir = path.join(sandboxRoot, "docs", "architecture");
+      fs.writeFileSync(
+        path.join(archDir, "overview.md"),
+        "# System Overview\n\n```mermaid\nflowchart TD\n  Client --> Server\n```\n",
+        "utf8"
+      );
+      fs.writeFileSync(
+        path.join(archDir, "data-flow.md"),
+        "# Data Flow\n\n```mermaid\nflowchart LR\n  Request --> Response\n```\n",
+        "utf8"
+      );
+
+      const doctorRes = runCli(sandboxRoot, ["doctor", "--json"]);
+      assert.equal(doctorRes.status, 0, doctorRes.stderr || doctorRes.stdout);
+      const report = JSON.parse(doctorRes.stdout);
+      assert.equal(report.ok, true);
+      assert.equal(
+        report.diagnostics.some((d) => d.code === "ARC001"),
+        false,
+        `Expected 1 mermaid block in overview.md and 1 in data-flow.md to pass ARC001, got: ${JSON.stringify(report.diagnostics)}`
+      );
+      assert.deepEqual(report.diagnostics, []);
+    });
+  });
+
+  it("test_doctor_with_arbitrary_architecture_topic_file_fails_with_dir001", () => {
+    withInitializedSandbox("arch-fixed-slots-bad-file", (sandboxRoot) => {
+      const badFile = path.join(sandboxRoot, "docs", "architecture", "billing-topic.md");
+      fs.writeFileSync(badFile, "# Billing Topic\n", "utf8");
+
+      const doctorRes = runCli(sandboxRoot, ["doctor", "--json"]);
+      assert.notEqual(
+        doctorRes.status,
+        0,
+        "harness doctor must fail when an unauthorized file exists in docs/architecture/"
+      );
+      const report = JSON.parse(doctorRes.stdout);
+      assert.equal(report.ok, false);
+      assert.ok(
+        report.diagnostics.some(
+          (d) => d.code === "DIR001" && d.file === "docs/architecture/billing-topic.md"
+        ),
+        `Expected DIR001 pointing to docs/architecture/billing-topic.md, got: ${JSON.stringify(report.diagnostics)}`
+      );
+    });
+  });
+
+  it("test_doctor_with_architecture_subdirectory_fails_with_dir001", () => {
+    withInitializedSandbox("arch-fixed-slots-bad-subdir", (sandboxRoot) => {
+      const badSubdir = path.join(sandboxRoot, "docs", "architecture", "modules");
+      fs.mkdirSync(badSubdir, { recursive: true });
+      fs.writeFileSync(path.join(badSubdir, "auth.md"), "# Auth Module\n", "utf8");
+
+      const doctorRes = runCli(sandboxRoot, ["doctor", "--json"]);
+      assert.notEqual(
+        doctorRes.status,
+        0,
+        "harness doctor must fail when a subdirectory exists in docs/architecture/"
+      );
+      const report = JSON.parse(doctorRes.stdout);
+      assert.equal(report.ok, false);
+      assert.ok(
+        report.diagnostics.some(
+          (d) => d.code === "DIR001" && d.file === "docs/architecture/modules"
+        ),
+        `Expected DIR001 pointing to docs/architecture/modules, got: ${JSON.stringify(report.diagnostics)}`
+      );
+    });
   });
 });
 
